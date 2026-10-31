@@ -143,7 +143,7 @@ export function Settings({ siteId }: { siteId: string }) {
           ← Dashboard
         </button>
         <div className="flex items-center gap-2 font-semibold">
-          <Favicon domain={site.domain} size={22} /> {site.name}
+          <Favicon domain={site.domain} siteId={site.id} size={22} /> {site.name}
         </div>
       </div>
 

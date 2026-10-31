@@ -101,7 +101,7 @@ export function Toolbar({
       <Dropdown
         button={
           <button className="btn h-11 px-4 text-base">
-            <Favicon domain={site.domain} size={22} />
+            <Favicon domain={site.domain} siteId={site.id} size={22} />
             <span className="max-w-[180px] truncate font-semibold">{site.name}</span>
             <Chevron />
           </button>
@@ -118,7 +118,7 @@ export function Toolbar({
                   navigate(`/site/${s.id}${window.location.search}`);
                 }}
               >
-                <Favicon domain={s.domain} size={16} /> {s.name}
+                <Favicon domain={s.domain} siteId={s.id} size={16} /> {s.name}
               </button>
             ))}
             <div className="my-1 border-t border-stone-100" />

@@ -1,9 +1,11 @@
 import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
+import { googleFaviconUrl } from '../shared/sources';
 import { handleEvent } from './collect';
 import { forgetSite, type AppEnv, type Site } from './env';
 import { clearSession, currentUser, googleCallback, googleStart, isHosted, requireUser, setSession, siteAccessSql } from './auth';
 import { billingWebhook, checkout, planInfo } from './billing';
+import { findFavicon } from './favicon';
 import { passwordsMatch, randomId } from './lib/crypto';
 import { handleDodoWebhook, handleGoalApi, handlePaymentApi, handleStripeWebhook, learnDodoProducts, rematchPayments } from './payments';
 import { breakdown, customers, funnel, makeCtx, overview, realtime, visitorProfile, visitors, type FunnelStep } from './stats';
@@ -197,6 +199,18 @@ app.patch('/api/sites/:id', async (c) => {
     .run();
   forgetSite(site.id);
   return c.json(publicSite(next));
+});
+
+app.get('/api/sites/:id/favicon', async (c) => {
+  const { domain } = c.get('site');
+  const icon = await findFavicon(domain);
+  c.header('Cache-Control', 'private, max-age=3600');
+  if (!icon) return c.redirect(googleFaviconUrl(domain));
+  // The bytes come from the site, and an SVG opened directly would otherwise run on the dashboard's origin.
+  c.header('Content-Type', icon.type);
+  c.header('Content-Security-Policy', 'sandbox');
+  c.header('X-Content-Type-Options', 'nosniff');
+  return c.body(icon.body);
 });
 
 app.post('/api/sites/:id/rotate-key', async (c) => {

@@ -1,9 +1,10 @@
 import { createHmac } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { classify } from '../src/shared/sources';
 import { parseTiers, planInfo } from '../src/worker/billing';
 import { belongsTo, normalizePath } from '../src/worker/collect';
 import type { Env } from '../src/worker/env';
+import { findFavicon, iconCandidates } from '../src/worker/favicon';
 import { verifyStandardWebhook, verifyStripeWebhook } from '../src/worker/lib/crypto';
 import { bucketLabels, resolveRange, startOfDay, tzOffset } from '../src/worker/lib/time';
 import { isBot, parseUA } from '../src/worker/lib/ua';
@@ -144,5 +145,66 @@ describe('price tiers', () => {
   });
   it('keeps selling the last buyable tier when the next price has no product yet', async () => {
     expect(await planInfo(env(12))).toMatchObject({ price: '$49', spotsLeft: null, nextPrice: '$100' });
+  });
+});
+
+describe('favicons', () => {
+  const html = `<head>
+    <link rel="stylesheet" href="/a.css">
+    <link rel="icon" href="/favicon.ico?v=1" type="image/x-icon" sizes="16x16"/>
+    <link rel="icon" href="/big.png" sizes="32x32 192x192">
+    <link rel="icon" href="/dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
+    <link rel="apple-touch-icon" href="/apple.png" sizes="180x180"/>
+    <link rel="shortcut icon" href='https://cdn.example.com/icon.svg?a=1&amp;b=2'>
+    <link rel="icon" href="http://example.com/insecure.png" sizes="512x512">
+  </head>`;
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Answers each URL from a map, and 404s the rest.
+  const stubFetch = (routes: Record<string, Response | Error>) => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const route = routes[url] ?? new Response('', { status: 404 });
+      if (route instanceof Error) throw route;
+      return route;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  };
+  const image = (type: string, body = 'icon') => new Response(body, { headers: { 'content-type': type } });
+
+  it('ranks vector icons, then size, then touch icons, then /favicon.ico', () => {
+    expect(iconCandidates(html, 'https://example.com/')).toEqual([
+      'https://cdn.example.com/icon.svg?a=1&b=2',
+      'https://example.com/big.png',
+      'https://example.com/favicon.ico?v=1',
+      'https://example.com/apple.png',
+      'https://example.com/favicon.ico',
+    ]);
+  });
+  it('picks the current icon from the homepage', async () => {
+    stubFetch({
+      'https://example.com/': new Response(html),
+      'https://cdn.example.com/icon.svg?a=1&b=2': image('image/svg+xml; charset=utf-8', '<svg/>'),
+    });
+    const icon = await findFavicon('example.com');
+    expect(icon?.type).toBe('image/svg+xml');
+    expect(new TextDecoder().decode(icon?.body)).toBe('<svg/>');
+  });
+  it('still tries /favicon.ico when the homepage is down', async () => {
+    stubFetch({ 'https://example.com/': new Error('offline'), 'https://example.com/favicon.ico': image('image/x-icon') });
+    expect((await findFavicon('example.com'))?.type).toBe('image/x-icon');
+  });
+  it('skips anything that is not an image', async () => {
+    stubFetch({
+      'https://example.com/': new Response('<link rel="icon" href="/page.html">'),
+      'https://example.com/page.html': image('text/html', '<script>alert(1)</script>'),
+      'https://example.com/favicon.ico': image('image/png'),
+    });
+    expect((await findFavicon('example.com'))?.type).toBe('image/png');
+  });
+  it('rejects oversized icons and gives up when nothing works', async () => {
+    stubFetch({ 'https://example.com/favicon.ico': image('image/png', 'x'.repeat(2 * 1024 * 1024)) });
+    expect(await findFavicon('example.com')).toBeNull();
   });
 });

@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { persona } from '../../shared/names';
-import { domainForSource } from '../../shared/sources';
+import { domainForSource, googleFaviconUrl } from '../../shared/sources';
 import { flag } from '../lib/format';
 
-export function Favicon({ domain, size = 18, fallback }: { domain?: string | null; size?: number; fallback?: string }) {
+// Pass siteId for a site on this dashboard: the worker reads its current icon instead of Google's cached one.
+export function Favicon({ domain, siteId, size = 18, fallback }: { domain?: string | null; siteId?: string; size?: number; fallback?: string }) {
   const [broken, setBroken] = useState(false);
   if (!domain || broken) {
     return (
@@ -17,7 +18,7 @@ export function Favicon({ domain, size = 18, fallback }: { domain?: string | nul
   }
   return (
     <img
-      src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`}
+      src={siteId ? `/api/sites/${siteId}/favicon` : googleFaviconUrl(domain)}
       width={size}
       height={size}
       className="shrink-0 rounded"
