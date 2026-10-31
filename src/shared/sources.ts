@@ -16,6 +16,8 @@ interface KnownSource {
   match: RegExp; // tested against referrer hostname, utm_source and ref
 }
 
+export const googleFaviconUrl = (domain: string) => `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
+
 export const KNOWN_SOURCES: KnownSource[] = [
   { name: 'X', domain: 'x.com', channel: 'Organic Social', match: /^(t\.co|(.*\.)?(x|twitter)\.com|x|twitter|tw)$/ },
   { name: 'Google', domain: 'google.com', channel: 'Organic Search', match: /^((www\.)?google\.[a-z.]+|google)$/ },

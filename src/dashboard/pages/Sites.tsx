@@ -48,7 +48,7 @@ export function Sites() {
         {sites?.map((s) => (
           <button key={s.id} onClick={() => navigate(`/site/${s.id}`)} className="card p-5 text-left transition hover:-translate-y-0.5 hover:shadow-md">
             <div className="flex items-center gap-3">
-              <Favicon domain={s.domain} size={28} />
+              <Favicon domain={s.domain} siteId={s.id} size={28} />
               <div className="min-w-0">
                 <div className="truncate font-semibold">{s.name}</div>
                 <div className="truncate text-sm text-stone-500">{s.domain}</div>

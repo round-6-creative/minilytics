@@ -289,7 +289,7 @@ export default function LiveView({ onClose }: { onClose: () => void }) {
       <div className={`absolute left-3 top-3 w-[min(360px,calc(100%-24px))] rounded-2xl border p-4 shadow-xl backdrop-blur ${panel}`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-semibold">
-            <Favicon domain={site.domain} size={18} /> {site.name}
+            <Favicon domain={site.domain} siteId={site.id} size={18} /> {site.name}
             <span className={`text-xs font-medium uppercase tracking-wider ${muted}`}>· Real-time</span>
           </div>
           <div className="flex items-center">
