@@ -398,6 +398,14 @@ export async function handleDodoWebhook(c: Context<AppEnv>) {
   return c.json({ ok: true });
 }
 
+/** Whether a Stripe event belongs to this site. Refunds pass, because only a payment already on the site can be refunded. */
+export function matchesStripeApp(stripeApp: string | null | undefined, type: string, o: Record<string, any>): boolean {
+  if (!stripeApp || type === 'charge.refunded') return true;
+  // Older API versions put an invoice's subscription metadata on the object, newer ones under `parent`.
+  const details = o.subscription_details ?? o.parent?.subscription_details;
+  return (o.metadata?.app ?? details?.metadata?.app) === stripeApp;
+}
+
 /** Stripe webhook: POST /api/webhooks/stripe/:siteId */
 export async function handleStripeWebhook(c: Context<AppEnv>) {
   const site = await getSite(c.env.DB, c.req.param('siteId')!);
@@ -411,6 +419,8 @@ export async function handleStripeWebhook(c: Context<AppEnv>) {
 
   const event = JSON.parse(body) as { type: string; data: { object: Record<string, any> } };
   const o = event.data?.object ?? {};
+  // A Stripe account selling several products sends all of them to every webhook.
+  if (!matchesStripeApp(site.stripe_app, event.type, o)) return c.json({ ok: true, ignored: 'another product' });
   const ts = (Number(o.created) || Date.now() / 1000) * 1000;
   // Older API versions put these on the object, newer ones under `parent`.
   const subscriptionId = str(o.subscription) ?? str(o.parent?.subscription_details?.subscription);

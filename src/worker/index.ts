@@ -179,12 +179,17 @@ app.patch('/api/sites/:id', async (c) => {
   if (typeof b.stripe_webhook_secret === 'string' && !b.stripe_webhook_secret.includes('•')) {
     next.stripe_webhook_secret = b.stripe_webhook_secret.trim() || null;
   }
+  if (typeof b.stripe_app === 'string') {
+    const app = b.stripe_app.trim();
+    if (app && !/^[\w-]{1,64}$/.test(app)) return c.json({ error: 'Use letters, numbers, - and _ only' }, 400);
+    next.stripe_app = app || null;
+  }
   if (typeof b.dodo_product_ids === 'string') {
     const ids = b.dodo_product_ids.split(/[\s,]+/).filter((x) => /^pdt_[\w-]+$/.test(x));
     next.dodo_product_ids = ids.join(',') || null;
   }
   await c.env.DB.prepare(
-    'UPDATE sites SET name = ?, domain = ?, timezone = ?, currency = ?, dodo_webhook_secret = ?, dodo_product_ids = ?, stripe_webhook_secret = ? WHERE id = ?',
+    'UPDATE sites SET name = ?, domain = ?, timezone = ?, currency = ?, dodo_webhook_secret = ?, dodo_product_ids = ?, stripe_webhook_secret = ?, stripe_app = ? WHERE id = ?',
   )
     .bind(
       next.name,
@@ -194,6 +199,7 @@ app.patch('/api/sites/:id', async (c) => {
       next.dodo_webhook_secret,
       next.dodo_product_ids ?? null,
       next.stripe_webhook_secret ?? null,
+      next.stripe_app ?? null,
       site.id,
     )
     .run();

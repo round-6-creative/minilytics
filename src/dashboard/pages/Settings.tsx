@@ -117,6 +117,7 @@ export function Settings({ siteId }: { siteId: string }) {
         dodo_webhook_secret: s.dodo_webhook_secret ?? '',
         dodo_product_ids: s.dodo_product_ids ?? '',
         stripe_webhook_secret: s.stripe_webhook_secret ?? '',
+        stripe_app: s.stripe_app ?? '',
       });
     });
   }, [siteId]);
@@ -421,6 +422,24 @@ await stripe.checkout.sessions.create({
           </p>
         </Step>
       </Steps>
+      <details className="mt-5 text-sm">
+        <summary className="cursor-pointer font-medium text-stone-600">Selling other products from the same Stripe account?</summary>
+        <p className="mt-2 text-stone-500">
+          Add <code>app</code> to the metadata of this site's checkouts and subscriptions, then enter that value so only their payments
+          count.
+        </p>
+        <div className="mt-2 flex gap-2">
+          <input
+            className="input font-mono"
+            placeholder="my-app"
+            value={form.stripe_app ?? ''}
+            onChange={(e) => set({ stripe_app: e.target.value })}
+          />
+          <button className="btn-dark" onClick={() => save({ stripe_app: form.stripe_app ?? '' }, 'Product saved')}>
+            Save
+          </button>
+        </div>
+      </details>
       <ProviderFooter anchor="stripe" />
     </>
   );

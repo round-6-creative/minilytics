@@ -32,6 +32,7 @@ export interface Site {
   dodo_webhook_secret: string | null;
   dodo_product_ids?: string | null;
   stripe_webhook_secret?: string | null;
+  stripe_app?: string | null;
   created_at: number;
   visitors24h?: number;
   online?: number;

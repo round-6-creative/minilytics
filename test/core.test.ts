@@ -8,6 +8,7 @@ import { findFavicon, iconCandidates } from '../src/worker/favicon';
 import { verifyStandardWebhook, verifyStripeWebhook } from '../src/worker/lib/crypto';
 import { bucketLabels, resolveRange, startOfDay, tzOffset } from '../src/worker/lib/time';
 import { isBot, parseUA } from '../src/worker/lib/ua';
+import { matchesStripeApp } from '../src/worker/payments';
 
 describe('classify', () => {
   it('maps t.co to X / social', () => {
@@ -206,5 +207,27 @@ describe('favicons', () => {
   it('rejects oversized icons and gives up when nothing works', async () => {
     stubFetch({ 'https://example.com/favicon.ico': image('image/png', 'x'.repeat(2 * 1024 * 1024)) });
     expect(await findFavicon('example.com')).toBeNull();
+  });
+});
+
+describe('Stripe product filter', () => {
+  const invoice = (app: string) => ({ subscription_details: { metadata: { app } } });
+  const newInvoice = (app: string) => ({ parent: { subscription_details: { metadata: { app } } } });
+
+  it('counts everything when the site has no filter', () => {
+    expect(matchesStripeApp(null, 'checkout.session.completed', {})).toBe(true);
+  });
+  it('keeps only checkouts tagged with the site', () => {
+    expect(matchesStripeApp('dropfolio', 'checkout.session.completed', { metadata: { app: 'dropfolio' } })).toBe(true);
+    expect(matchesStripeApp('dropfolio', 'checkout.session.completed', { metadata: { app: 'cropfolio' } })).toBe(false);
+    expect(matchesStripeApp('dropfolio', 'checkout.session.completed', {})).toBe(false);
+  });
+  it('reads invoice metadata from old and new API versions', () => {
+    expect(matchesStripeApp('dropfolio', 'invoice.paid', invoice('dropfolio'))).toBe(true);
+    expect(matchesStripeApp('dropfolio', 'invoice.paid', newInvoice('dropfolio'))).toBe(true);
+    expect(matchesStripeApp('dropfolio', 'invoice.paid', newInvoice('cropfolio'))).toBe(false);
+  });
+  it('lets refunds through to be matched against the site\'s payments', () => {
+    expect(matchesStripeApp('dropfolio', 'charge.refunded', {})).toBe(true);
   });
 });
