@@ -234,6 +234,10 @@ clicked (unless you already set your own). Set the link's confirmation page to r
 
 Subscription renewals (`invoice.paid`) are credited to the visitor who first subscribed. Refunds are subtracted.
 
+Selling other products from the same Stripe account? Every webhook receives all of them. Add `app` to the metadata of the
+Checkout Session and to `subscription_data.metadata`, then enter that value in the site's Stripe settings. Payments
+without it are ignored.
+
 ### How credit is given
 
 A payment goes to the paying visitor's last visit that came from a real source (last non-direct

@@ -41,6 +41,7 @@ export interface Site {
   owner_id?: string | null;
   dodo_product_ids?: string | null;
   stripe_webhook_secret?: string | null;
+  stripe_app?: string | null;
 }
 
 /** A site plus its owner's plan, used to stop recording when a hosted plan lapses. */
