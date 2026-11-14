@@ -173,6 +173,11 @@ The Terms, Privacy and Refund pages (`/terms`, `/privacy`, `/refund`) are plain-
 - **Ignore your own visits:** open `https://yoursite.com/?ml_ignore=true` once per browser
 - **Single-page apps** (Next.js, React Router…) are handled automatically
 - **Subdomains:** `app.yoursite.com` and `yoursite.com` share the same visitor, because the cookie is set on the root domain
+- **No cookies:** add `data-cookieless`. The script then sets no cookies and stores nothing. The server counts a visitor
+  from a hash of their IP, user agent and a random salt that is replaced every UTC day and the old one deleted, so the
+  same person on another day counts as new and no IP is kept. A session ends after 30 minutes without activity.
+  Revenue attribution through checkout links and `identify` are off on such a site. Load the script and send events
+  straight to the Minilytics host: a proxy in between hides the visitor's IP and merges everyone into one visitor.
 
 ### Tracking a specific tweet / article
 

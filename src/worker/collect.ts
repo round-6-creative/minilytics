@@ -19,6 +19,8 @@ interface Payload {
   n?: string;
   p?: Record<string, unknown>;
   d?: number;
+  /** 1 when the site loads the script with data-cookieless: no vid/sid from the browser, the server derives them. */
+  c?: number;
 }
 
 const clip = (s: unknown, n = 255): string | null =>
@@ -55,7 +57,10 @@ export async function handleEvent(c: Context<AppEnv>) {
   } catch {
     return c.body(null, 400);
   }
-  if (!body || !isId(body.w) || !TYPES.has(body.t) || !isId(body.vid) || !isId(body.sid)) return c.body(null, 400);
+  const cookieless = body?.c === 1;
+  if (!body || !isId(body.w) || !TYPES.has(body.t) || (!cookieless && (!isId(body.vid) || !isId(body.sid)))) return c.body(null, 400);
+  // Without a cookie there is no lasting visitor to attach a user to.
+  if (cookieless && body.t === 'identify') return c.body(null, 202);
 
   const ua = c.req.header('user-agent') ?? '';
   if (isBot(ua)) return c.body(null, 202);
@@ -74,8 +79,54 @@ export async function handleEvent(c: Context<AppEnv>) {
   // Only accept data for the site's own domain, so nobody can pollute your stats from elsewhere.
   if (!belongsTo(url.hostname, site.domain)) return c.body(null, 403);
 
-  await ingest(c.env.DB, site, body, url, ua, geoOf(c), Date.now());
+  const now = Date.now();
+  let known = false;
+  if (cookieless) {
+    const salt = await dailySalt(c.env.DB, now);
+    body.vid = await anonVisitorId(salt, site.id, c.req.header('cf-connecting-ip') ?? '', ua);
+    const open = await openSession(c.env.DB, site.id, body.vid, now);
+    known = !!open;
+    body.sid = open ?? (await anonVisitorId(salt, site.id, body.vid, String(now)));
+  }
+  await ingest(c.env.DB, site, body, url, ua, geoOf(c), now, known);
   return c.body(null, 202);
+}
+
+export const SESSION_GAP_MS = 30 * 60_000;
+
+/** Hex SHA-256 of the parts, cut to 32 characters. With a daily salt this is Plausible's cookieless visitor id. */
+export async function anonVisitorId(salt: string, siteId: string, ip: string, ua: string): Promise<string> {
+  const data = new TextEncoder().encode([salt, siteId, ip, ua].join('|'));
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  return Array.from(hash.slice(0, 16), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10);
+
+let saltCache: { day: string; salt: string } | null = null;
+
+/** Today's random salt. The first request of a UTC day creates it and deletes every older one. */
+export async function dailySalt(db: D1Database, now: number): Promise<string> {
+  const day = utcDay(now);
+  if (saltCache?.day === day) return saltCache.salt;
+  const fresh = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const [, row] = await db.batch<{ salt: string }>([
+    db.prepare('INSERT OR IGNORE INTO daily_salts (day, salt) VALUES (?, ?)').bind(day, fresh),
+    db.prepare('SELECT salt FROM daily_salts WHERE day = ?').bind(day),
+    db.prepare('DELETE FROM daily_salts WHERE day < ?').bind(day),
+  ]);
+  const salt = row.results[0]?.salt ?? fresh;
+  saltCache = { day, salt };
+  return salt;
+}
+
+/** The visitor's session if it was active in the last 30 minutes (uses the sessions_visitor index). */
+async function openSession(db: D1Database, siteId: string, vid: string, now: number): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT id FROM sessions WHERE site_id = ? AND visitor_id = ? AND last_seen_at > ? ORDER BY last_seen_at DESC LIMIT 1')
+    .bind(siteId, vid, now - SESSION_GAP_MS)
+    .first<{ id: string }>();
+  return row?.id ?? null;
 }
 
 export interface Geo {
@@ -132,6 +183,7 @@ export async function ingest(
   ua: string,
   geo: Geo,
   now: number,
+  known = false,
 ) {
   const path = normalizePath(url.pathname);
   const { t, vid, sid } = body;
@@ -158,10 +210,12 @@ export async function ingest(
     return;
   }
 
-  const existing = await db
-    .prepare('SELECT 1 FROM sessions WHERE site_id = ? AND id = ?')
-    .bind(site.id, sid)
-    .first();
+  const existing =
+    known ||
+    (await db
+      .prepare('SELECT 1 FROM sessions WHERE site_id = ? AND id = ?')
+      .bind(site.id, sid)
+      .first());
 
   const stmts: D1PreparedStatement[] = [];
   if (!existing) {

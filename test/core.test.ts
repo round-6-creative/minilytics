@@ -231,3 +231,19 @@ describe('Stripe product filter', () => {
     expect(matchesStripeApp('dropfolio', 'charge.refunded', {})).toBe(true);
   });
 });
+
+describe('cookieless visitor ids', () => {
+  it('are stable for the same salt, site, IP and user agent, and change with any of them', async () => {
+    const { anonVisitorId } = await import('../src/worker/collect');
+    const a = await anonVisitorId('salt1', 'site', '203.0.113.7', 'UA');
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(await anonVisitorId('salt1', 'site', '203.0.113.7', 'UA')).toBe(a);
+    for (const other of [
+      await anonVisitorId('salt2', 'site', '203.0.113.7', 'UA'),
+      await anonVisitorId('salt1', 'other', '203.0.113.7', 'UA'),
+      await anonVisitorId('salt1', 'site', '203.0.113.8', 'UA'),
+      await anonVisitorId('salt1', 'site', '203.0.113.7', 'UA2'),
+    ])
+      expect(other).not.toBe(a);
+  });
+});
