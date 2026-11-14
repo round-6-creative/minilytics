@@ -9,6 +9,9 @@
   var endpoint = script.getAttribute('data-api') || new URL(script.src).origin + '/api/event';
   var allowLocal = script.hasAttribute('data-allow-localhost');
   var cookieDomain = script.getAttribute('data-domain');
+  // No cookies at all: the server counts a visitor from a daily-salted hash of IP and user agent instead.
+  // Needs requests to reach the Minilytics worker directly (a proxy hides the visitor's IP).
+  var cookieless = script.hasAttribute('data-cookieless');
   var VID = 'ml_vid', SID = 'ml_sid', YEAR = 31536000, SESSION = 1800;
 
   var queued = (w.minilytics && w.minilytics.q) || [];
@@ -48,7 +51,7 @@
     }
     return null;
   }
-  var domain = rootDomain();
+  var domain = cookieless ? (cookieDomain || loc.hostname.replace(/^www\./, '')) : rootDomain();
   function writeCookie(name, value, maxAge) {
     d.cookie = name + '=' + encodeURIComponent(value) + '; path=/; max-age=' + maxAge + '; SameSite=Lax' +
       (domain ? '; domain=' + domain : '') + (loc.protocol === 'https:' ? '; Secure' : '');
@@ -61,6 +64,7 @@
     });
   }
   function ids() {
+    if (cookieless) return {};
     var vid = readCookie(VID) || uuid();
     var sid = readCookie(SID) || uuid();
     writeCookie(VID, vid, YEAR);
@@ -83,6 +87,7 @@
   function send(type, extra, beacon) {
     var id = ids();
     var body = { w: siteId, t: type, u: cleanUrl(loc.href), vid: id.vid, sid: id.sid, sw: w.screen ? screen.width : 0 };
+    if (cookieless) body.c = 1;
     for (var k in extra) if (extra[k] !== undefined) body[k] = extra[k];
     var json = JSON.stringify(body);
     // text/plain keeps this a "simple" request: no CORS preflight, works with sendBeacon.
@@ -136,6 +141,7 @@
     send('goal', { n: String(name).slice(0, 64), p: props || undefined }, true);
   }
   function attribution() {
+    if (cookieless) return {};
     var id = ids();
     return { ml_visitor_id: id.vid, ml_session_id: id.sid };
   }
@@ -144,6 +150,7 @@
   // page, not just on click, because other scripts (e.g. Umami's click tracking) may copy the href and
   // navigate before our click handler runs.
   function tagCheckoutLink(a) {
+    if (cookieless) return;
     try {
       var u = new URL(a.href);
       var att = attribution();
@@ -211,7 +218,7 @@
   // ---- public API
   function api(cmd, a, b) {
     if (cmd === 'goal' || cmd === 'track') goal(a, b);
-    else if (cmd === 'identify' && a) send('identify', { p: { user_id: a.user_id || a.id, email: a.email, name: a.name } });
+    else if (cmd === 'identify' && a && !cookieless) send('identify', { p: { user_id: a.user_id || a.id, email: a.email, name: a.name } });
     else if (cmd === 'pageview') { lastPage = null; pageview(); }
   }
   api.attribution = attribution;
