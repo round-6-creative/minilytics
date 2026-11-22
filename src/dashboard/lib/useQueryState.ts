@@ -14,6 +14,7 @@ function read(): Query {
     to: p.get('to') || undefined,
     granularity: p.get('granularity') || undefined,
     filters,
+    attr: p.get('attr') === 'first' ? 'first' : undefined,
   };
 }
 
@@ -39,6 +40,7 @@ export function useQueryState() {
       if (next.to) p.set('to', next.to);
       if (next.granularity) p.set('granularity', next.granularity);
       if (Object.keys(next.filters).length) p.set('filters', JSON.stringify(next.filters));
+      if (next.attr === 'first') p.set('attr', 'first');
       window.history.replaceState(null, '', `${window.location.pathname}?${p}`);
       return next;
     });

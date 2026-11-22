@@ -1,8 +1,20 @@
 import { useState } from 'react';
-import { Area, Bar, CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import type { Kpis, Overview } from '../lib/api';
+import { Area, Bar, CartesianGrid, ComposedChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { api, type Annotation, type Kpis, type Overview } from '../lib/api';
 import { useDash } from '../lib/context';
-import { bucketLabel, fmtDuration, fmtNumber, fmtPct } from '../lib/format';
+import { bucketLabel, dayInTz, fmtDuration, fmtNumber, fmtPct } from '../lib/format';
+import { useApi } from '../lib/useApi';
+
+/** The chart bucket a note's day falls in, for the chart's granularity (mirrors the server's bucket labels). */
+function bucketOfDay(day: string, g: string, buckets: string[]): string | undefined {
+  if (g === 'day') return buckets.includes(day) ? day : undefined;
+  if (g === 'hour') return buckets.find((b) => b.startsWith(day));
+  if (g === 'month') return buckets.includes(day.slice(0, 7)) ? day.slice(0, 7) : undefined;
+  // Weeks are labelled by their Monday.
+  const d = new Date(day + 'T00:00:00Z');
+  const monday = new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * 86_400_000).toISOString().slice(0, 10);
+  return buckets.includes(monday) ? monday : undefined;
+}
 
 type Metric = 'visitors' | 'revenue';
 
@@ -20,8 +32,31 @@ function Change({ cur, prev, invert = false }: { cur: number; prev: number; inve
 }
 
 export function OverviewCard({ data, onLive }: { data: Overview | null; onLive: () => void }) {
-  const { money } = useDash();
+  const { money, base, readonly, site } = useDash();
   const [hidden, setHidden] = useState<Record<Metric, boolean>>({ visitors: false, revenue: false });
+  const [notesVersion, setNotesVersion] = useState(0);
+  const [adding, setAdding] = useState(false);
+  const [noteDay, setNoteDay] = useState(() => dayInTz(Date.now(), site.timezone));
+  const [noteText, setNoteText] = useState('');
+  const { data: notes } = useApi<Annotation[]>(`${base}/annotations`, notesVersion);
+  const buckets = data?.series.map((s) => s.bucket) ?? [];
+  const granularity = data?.range.granularity ?? 'day';
+  // Notes that fall inside the chart, grouped by the bucket they mark.
+  const marks = new Map<string, Annotation[]>();
+  for (const n of notes ?? []) {
+    const b = bucketOfDay(n.day, granularity, buckets);
+    if (b) marks.set(b, [...(marks.get(b) ?? []), n]);
+  }
+  const shown = [...marks.values()].flat();
+
+  async function addNote(e: React.FormEvent) {
+    e.preventDefault();
+    if (!noteText.trim()) return;
+    await api(`${base}/annotations`, { method: 'POST', json: { day: noteDay, text: noteText } });
+    setNoteText('');
+    setAdding(false);
+    setNotesVersion((v) => v + 1);
+  }
   const c = data?.current;
   const p = data?.previous;
 
@@ -57,12 +92,12 @@ export function OverviewCard({ data, onLive }: { data: Overview | null; onLive: 
           </button>
         ))}
         {data && (
-          <button className="px-5 py-4 text-left hover:bg-stone-50" onClick={onLive} title="Open the live map (M)">
+          <button className={`px-5 py-4 text-left ${readonly ? 'cursor-default' : 'hover:bg-stone-50'}`} onClick={readonly ? undefined : onLive} title={readonly ? undefined : 'Open the live map (M)'}>
             <div className="flex items-center gap-1.5 text-sm text-stone-500">
               Online <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
             </div>
             <div className="mt-1 text-[28px] font-semibold leading-tight">{data.online}</div>
-            <div className="text-xs text-stone-400">View on map →</div>
+            {!readonly && <div className="text-xs text-stone-400">View on map →</div>}
           </button>
         )}
         {!data && <div className="col-span-full h-[98px] animate-pulse bg-stone-50" />}
@@ -120,10 +155,30 @@ export function OverviewCard({ data, onLive }: { data: Overview | null; onLive: 
                       <Row color="bg-stone-300" label="Pageviews" value={fmtNumber(d.pageviews)} />
                       <Row color="bg-revenue" label="Revenue" value={money(d.revenue)} />
                       {d.payments > 0 && <Row color="bg-revenueSoft" label="Payments" value={String(d.payments)} />}
+                      {marks.get(d.bucket)?.map((n) => (
+                        <div key={n.id} className="mt-1.5 max-w-[240px] border-t border-stone-100 pt-1.5 text-stone-600">
+                          📌 {n.text}
+                        </div>
+                      ))}
                     </div>
                   );
                 }}
               />
+              {[...marks.keys()].map((b) => (
+                <ReferenceLine
+                  key={b}
+                  yAxisId="v"
+                  x={b}
+                  stroke="#a8a29e"
+                  strokeDasharray="3 3"
+                  label={({ viewBox }: { viewBox: { x: number; y: number } }) => (
+                    <g>
+                      <circle cx={viewBox.x} cy={viewBox.y + 5} r={5} fill="#1c1917" />
+                      <title>{marks.get(b)!.map((n) => n.text).join(' · ')}</title>
+                    </g>
+                  )}
+                />
+              ))}
               {!hidden.revenue && (
                 <Bar yAxisId="r" dataKey="revenue" fill="#e07b5f" radius={[4, 4, 0, 0]} maxBarSize={36} isAnimationActive={false} />
               )}
@@ -144,6 +199,44 @@ export function OverviewCard({ data, onLive }: { data: Overview | null; onLive: 
           </ResponsiveContainer>
         )}
       </div>
+
+      {(shown.length > 0 || !readonly) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-stone-100 px-4 py-2.5 text-sm">
+          {shown.map((n) => (
+            <span key={n.id} className="flex items-center gap-1.5 rounded-lg bg-stone-100 py-0.5 pl-2 pr-1 text-stone-700">
+              <span className="text-xs text-stone-500">{new Date(n.day + 'T00:00:00Z').toLocaleDateString('en', { day: 'numeric', month: 'short', timeZone: 'UTC' })}</span>
+              {n.text}
+              {!readonly && (
+                <button
+                  className="rounded px-1 text-stone-400 hover:bg-stone-200 hover:text-ink"
+                  aria-label="Delete note"
+                  onClick={async () => {
+                    await api(`${base}/annotations/${n.id}`, { method: 'DELETE' });
+                    setNotesVersion((v) => v + 1);
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </span>
+          ))}
+          {!readonly &&
+            (adding ? (
+              <form className="flex flex-wrap items-center gap-2" onSubmit={addNote}>
+                <input type="date" className="input w-auto py-1" value={noteDay} onChange={(e) => setNoteDay(e.target.value)} />
+                <input className="input w-64 py-1" placeholder="What happened? e.g. Launched on Product Hunt" value={noteText} onChange={(e) => setNoteText(e.target.value)} maxLength={200} autoFocus />
+                <button className="btn-dark py-1">Add</button>
+                <button type="button" className="text-stone-500 hover:text-ink" onClick={() => setAdding(false)}>
+                  Cancel
+                </button>
+              </form>
+            ) : (
+              <button className="text-stone-500 hover:text-ink" onClick={() => setAdding(true)} title="Mark a launch, a post or a change on the chart">
+                📌 Add a note
+              </button>
+            ))}
+        </div>
+      )}
     </div>
   );
 }

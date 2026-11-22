@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, qs, type BreakdownRow } from '../lib/api';
 import { displayName } from '../../shared/names';
 import { useDash } from '../lib/context';
+import { downloadCsv } from '../lib/csv';
 import { countryName, fmtAgo, fmtDateTime, fmtDuration, fmtNumber, fmtPct } from '../lib/format';
 import { useApi } from '../lib/useApi';
 import { Avatar, BrowserIcon, DeviceIcon, Flag, OSIcon, SourceIcon } from './Icons';
@@ -9,13 +10,16 @@ import { Avatar, BrowserIcon, DeviceIcon, Flag, OSIcon, SourceIcon } from './Ico
 type Tab = 'goal' | 'funnel' | 'user' | 'journey';
 
 export function GoalsPanel({ totalVisitors }: { totalVisitors: number }) {
-  const [tab, setTab] = useState<Tab>('journey');
+  const { readonly } = useDash();
+  // A shared link shows what happened, never who did it.
+  const tabs: readonly Tab[] = readonly ? ['goal', 'funnel'] : ['goal', 'funnel', 'user', 'journey'];
+  const [tab, setTab] = useState<Tab>(readonly ? 'goal' : 'journey');
   const [search, setSearch] = useState('');
   return (
     <div className="card p-3">
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3">
         <div className="tabs">
-          {(['goal', 'funnel', 'user', 'journey'] as const).map((t) => (
+          {tabs.map((t) => (
             <button key={t} className={`tab capitalize ${tab === t ? 'tab-active' : ''}`} onClick={() => setTab(t)}>
               {t === 'journey' ? 'Journey' : t === 'user' ? 'Users' : t === 'goal' ? 'Goals' : 'Funnel'}
             </button>
@@ -34,8 +38,8 @@ export function GoalsPanel({ totalVisitors }: { totalVisitors: number }) {
 }
 
 function Goals({ totalVisitors }: { totalVisitors: number }) {
-  const { site, q, reloadKey, money, addFilter } = useDash();
-  const { data } = useApi<BreakdownRow[]>(`/api/sites/${site.id}/breakdown?${qs(q, { dim: 'goal' })}`, reloadKey);
+  const { base, q, reloadKey, money, addFilter } = useDash();
+  const { data } = useApi<BreakdownRow[]>(`${base}/breakdown?${qs(q, { dim: 'goal' })}`, reloadKey);
   if (!data) return <div className="h-40 animate-pulse" />;
   if (!data.length)
     return (
@@ -77,18 +81,19 @@ interface FunnelDef {
 }
 
 function Funnels() {
-  const { site, q, reloadKey } = useDash();
+  const { base, q, reloadKey, readonly } = useDash();
   const [version, setVersion] = useState(0);
-  const { data: funnels } = useApi<FunnelDef[]>(`/api/sites/${site.id}/funnels`, version);
+  const { data: funnels } = useApi<FunnelDef[]>(`${base}/funnels`, version);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const current = funnels?.find((f) => f.id === selected) ?? funnels?.[0];
   const { data: stats } = useApi<(FunnelDef['steps'][0] & { visitors: number })[]>(
-    current ? `/api/sites/${site.id}/funnels/${current.id}/stats?${qs(q)}` : null,
+    current ? `${base}/funnels/${current.id}/stats?${qs(q)}` : null,
     reloadKey + version,
   );
 
   if (!funnels) return <div className="h-40 animate-pulse" />;
+  if (readonly && !funnels.length) return <div className="p-8 text-center text-sm text-stone-500">No funnels have been set up.</div>;
   if (creating || !funnels.length)
     return (
       <FunnelForm
@@ -112,15 +117,17 @@ function Funnels() {
             </option>
           ))}
         </select>
-        <button className="btn py-1.5" onClick={() => setCreating(true)}>
-          + New funnel
-        </button>
-        {current && (
+        {!readonly && (
+          <button className="btn py-1.5" onClick={() => setCreating(true)}>
+            + New funnel
+          </button>
+        )}
+        {current && !readonly && (
           <button
             className="btn py-1.5 text-red-600"
             onClick={async () => {
               if (!confirm(`Delete funnel "${current.name}"?`)) return;
-              await api(`/api/sites/${site.id}/funnels/${current.id}`, { method: 'DELETE' });
+              await api(`${base}/funnels/${current.id}`, { method: 'DELETE' });
               setSelected(null);
               setVersion((v) => v + 1);
             }}
@@ -155,7 +162,7 @@ function Funnels() {
 }
 
 function FunnelForm({ onDone, canCancel }: { onDone: (id?: string) => void; canCancel: boolean }) {
-  const { site } = useDash();
+  const { base } = useDash();
   const [name, setName] = useState('Signup funnel');
   const [steps, setSteps] = useState<FunnelDef['steps']>([
     { type: 'page', value: '/' },
@@ -171,7 +178,7 @@ function FunnelForm({ onDone, canCancel }: { onDone: (id?: string) => void; canC
       onSubmit={async (e) => {
         e.preventDefault();
         try {
-          const f = await api<FunnelDef>(`/api/sites/${site.id}/funnels`, { method: 'POST', json: { name, steps } });
+          const f = await api<FunnelDef>(`${base}/funnels`, { method: 'POST', json: { name, steps } });
           onDone(f.id);
         } catch (err) {
           setError((err as Error).message);
@@ -262,12 +269,12 @@ const MATCH_LABELS: Record<string, string> = {
 };
 
 function Journey({ search }: { search: string }) {
-  const { site, q, reloadKey, money, openVisitor } = useDash();
+  const { base, site, q, reloadKey, money, openVisitor, decimals } = useDash();
   const [all, setAll] = useState(false);
   const [version, setVersion] = useState(0);
   const [rematch, setRematch] = useState<string | null>(null);
   const [reasons, setReasons] = useState<{ id: string; name: string | null; matched: boolean; reason: string | null }[]>([]);
-  const { data } = useApi<any[]>(`/api/sites/${site.id}/customers?${qs(q)}`, reloadKey + version);
+  const { data } = useApi<any[]>(`${base}/customers?${qs(q)}`, reloadKey + version);
   if (!data) return <div className="h-40 animate-pulse" />;
   if (!data.length)
     return <div className="p-8 text-center text-sm text-stone-500">No payments in this period. Connect Dodo Payments or Stripe in site settings to see who paid and where they came from.</div>;
@@ -287,7 +294,7 @@ function Journey({ search }: { search: string }) {
             disabled={rematch === 'working'}
             onClick={async () => {
               setRematch('working');
-              const r = await api<{ matched: number; checked: number; details: typeof reasons }>(`/api/sites/${site.id}/rematch`, {
+              const r = await api<{ matched: number; checked: number; details: typeof reasons }>(`${base}/rematch`, {
                 method: 'POST',
               });
               setRematch(`Matched ${r.matched} of ${r.checked}`);
@@ -353,6 +360,12 @@ function Journey({ search }: { search: string }) {
                       <div>
                         <div>{r.source}</div>
                         {(r.utm_campaign || r.ref) && <div className="text-xs text-stone-500">{r.utm_campaign || r.ref}</div>}
+                        {q.attr !== 'first' && r.first_source && r.first_source !== r.source && (
+                          <div className="text-xs text-stone-400" title="Where this visitor came from the very first time">first came from {r.first_source}</div>
+                        )}
+                        {q.attr === 'first' && r.last_source && r.last_source !== r.source && (
+                          <div className="text-xs text-stone-400" title="The last visit with a source before paying">last came from {r.last_source}</div>
+                        )}
                         {r.matched_by && r.matched_by !== 'metadata' && (
                           <div className="text-xs text-stone-400" title="How this payment was linked to the visitor">
                             matched by {MATCH_LABELS[r.matched_by] ?? r.matched_by}
@@ -377,14 +390,29 @@ function Journey({ search }: { search: string }) {
         </tbody>
       </table>
       {!search && <ShowAll total={data.length} shown={all ? data.length : 10} onClick={() => setAll(true)} />}
+      <button
+        className="mx-auto mt-3 block text-xs font-semibold uppercase tracking-wider text-stone-400 hover:text-ink"
+        onClick={() =>
+          downloadCsv(
+            `${site.domain}-payments-${q.period}.csv`,
+            ['Paid at', `Amount (${site.currency})`, 'Repeat', 'Credited source', 'First source', 'Last source', 'Campaign', 'Country', 'Entry page', 'Matched by', 'Visits before', 'Email'],
+            data.map((r) => [
+              new Date(r.ts).toISOString(), (r.amount / 10 ** decimals).toFixed(decimals), r.renewal ? 'yes' : 'no', r.source, r.first_source, r.last_source,
+              r.utm_campaign || r.ref, r.country, r.entry_page, r.visitor_id ? (r.matched_by ?? 'metadata') : '', r.visits, r.email ?? r.pay_email,
+            ]),
+          )
+        }
+      >
+        ⤓ Export CSV
+      </button>
     </div>
   );
 }
 
 function Users({ search }: { search: string }) {
-  const { site, q, reloadKey, money, openVisitor } = useDash();
+  const { base, q, reloadKey, money, openVisitor } = useDash();
   const [all, setAll] = useState(false);
-  const { data } = useApi<any[]>(`/api/sites/${site.id}/visitors?${qs(q)}`, reloadKey);
+  const { data } = useApi<any[]>(`${base}/visitors?${qs(q)}`, reloadKey);
   if (!data) return <div className="h-40 animate-pulse" />;
   if (!data.length) return <div className="p-8 text-center text-sm text-stone-500">No visitors in this period.</div>;
   return (

@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { navigate } from '../App';
-import type { Overview, Query, Site } from '../lib/api';
+import { api, type Overview, type Query, type Site } from '../lib/api';
 import { dayInTz } from '../lib/format';
+import { useApi } from '../lib/useApi';
 import { Favicon } from './Icons';
+
+/** A shared link shows at most about three months at a time. */
+const SHARED_PERIODS = ['today', 'yesterday', '24h', '48h', '7d', '30d', '90d'];
+
+interface SavedView {
+  id: string;
+  name: string;
+  query: string;
+}
 
 export const PERIODS: { value: string; label: string }[] = [
   { value: 'today', label: 'Today' },
@@ -65,7 +75,11 @@ export function Toolbar({
   onRefresh,
   onLive,
   loading,
+  readonly = false,
+  base,
 }: {
+  readonly?: boolean;
+  base: string;
   site: Site;
   sites: Site[];
   q: Query;
@@ -77,6 +91,16 @@ export function Toolbar({
 }) {
   const [from, setFrom] = useState(q.from ?? '');
   const [to, setTo] = useState(q.to ?? '');
+  const [viewsVersion, setViewsVersion] = useState(0);
+  const { data: views } = useApi<SavedView[]>(readonly ? null : `${base}/views`, viewsVersion);
+  const periods = readonly ? PERIODS.filter((p) => SHARED_PERIODS.includes(p.value)) : PERIODS;
+
+  async function saveView() {
+    const name = prompt('Name this view (the current period and filters are saved)');
+    if (!name?.trim()) return;
+    await api(`${base}/views`, { method: 'POST', json: { name, query: window.location.search.replace(/^\?/, '') } });
+    setViewsVersion((v) => v + 1);
+  }
 
   const label =
     q.period === 'custom'
@@ -98,6 +122,12 @@ export function Toolbar({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {readonly ? (
+        <div className="btn h-11 cursor-default px-4 text-base hover:bg-white">
+          <Favicon domain={site.domain} size={22} />
+          <span className="max-w-[220px] truncate font-semibold">{site.name}</span>
+        </div>
+      ) : (
       <Dropdown
         button={
           <button className="btn h-11 px-4 text-base">
@@ -126,11 +156,12 @@ export function Toolbar({
               ⚙️ Site settings & install
             </button>
             <button className={itemCls(false)} onClick={() => navigate('/')}>
-              ＋ All websites
+              ← All websites
             </button>
           </>
         )}
       </Dropdown>
+      )}
 
       <div className="flex h-11 items-stretch rounded-xl border border-stone-200 bg-white shadow-card">
         <button className="rounded-l-xl px-3 text-xl text-stone-500 hover:bg-stone-50" onClick={() => shift(-1)} aria-label="Previous period">
@@ -145,7 +176,7 @@ export function Toolbar({
         >
           {(close) => (
             <>
-              {PERIODS.map((p) => (
+              {periods.map((p) => (
                 <button
                   key={p.value}
                   className={itemCls(q.period === p.value)}
@@ -208,9 +239,89 @@ export function Toolbar({
         }
       </Dropdown>
 
-      <button className="btn h-11 px-4 text-base" onClick={onLive} title="Live map (M)">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" /> Live
-      </button>
+      <Dropdown
+        button={
+          <button className="btn h-11 px-4 text-base" title="Which visit gets the credit for a payment">
+            {q.attr === 'first' ? 'First touch' : 'Last touch'} <Chevron />
+          </button>
+        }
+      >
+        {(close) => (
+          <div className="w-72">
+            {[
+              { value: undefined, label: 'Last touch', hint: 'The last visit that came from somewhere before paying. A direct return visit does not take the credit.' },
+              { value: 'first', label: 'First touch', hint: 'The visit that first brought the customer to the site.' },
+            ].map((m) => (
+              <button
+                key={m.label}
+                className={`${itemCls((q.attr ?? undefined) === m.value)} flex-col !items-start !gap-0.5`}
+                onClick={() => {
+                  close();
+                  update({ attr: m.value });
+                }}
+              >
+                <span>{m.label}</span>
+                <span className="text-xs font-normal text-stone-500">{m.hint}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </Dropdown>
+
+      {!readonly && (
+        <Dropdown
+          button={
+            <button className="btn h-11 px-4 text-base" title="Saved periods and filters">
+              Views <Chevron />
+            </button>
+          }
+        >
+          {(close) => (
+            <div className="w-64">
+              {views?.map((v) => (
+                <div key={v.id} className="flex items-center">
+                  <button
+                    className={`${itemCls(false)} min-w-0 flex-1`}
+                    onClick={() => {
+                      close();
+                      navigate(`/site/${site.id}?${v.query}`);
+                    }}
+                  >
+                    <span className="truncate">{v.name}</span>
+                  </button>
+                  <button
+                    className="rounded-lg px-2 py-1 text-stone-400 hover:bg-stone-100 hover:text-ink"
+                    aria-label={`Delete view ${v.name}`}
+                    onClick={async () => {
+                      await api(`${base}/views/${v.id}`, { method: 'DELETE' });
+                      setViewsVersion((x) => x + 1);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {views && !views.length && <div className="px-3 py-2 text-sm text-stone-500">No saved views yet.</div>}
+              <div className="my-1 border-t border-stone-100" />
+              <button
+                className={itemCls(false)}
+                onClick={() => {
+                  close();
+                  saveView();
+                }}
+              >
+                ＋ Save the current view
+              </button>
+            </div>
+          )}
+        </Dropdown>
+      )}
+
+      {!readonly && (
+        <button className="btn h-11 px-4 text-base" onClick={onLive} title="Live map (M)">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" /> Live
+        </button>
+      )}
 
       <button className="btn h-11 w-11 px-0" onClick={onRefresh} aria-label="Refresh">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={loading ? 'animate-spin' : ''}>

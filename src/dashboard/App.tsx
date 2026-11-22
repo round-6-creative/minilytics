@@ -7,6 +7,7 @@ import { Legal } from './pages/Legal';
 import { Login } from './pages/Login';
 import { Settings } from './pages/Settings';
 import { Sites } from './pages/Sites';
+import { Workspace } from './pages/Workspace';
 
 export function navigate(to: string) {
   window.history.pushState(null, '', to);
@@ -67,6 +68,10 @@ export function App() {
   const legal = /^\/(terms|privacy|refund)\/?$/.exec(path);
   if (legal) return <Legal page={legal[1] as 'terms' | 'privacy' | 'refund'} />;
 
+  // A shared dashboard needs no login: the link itself is the permission.
+  const share = /^\/share\/([\w-]{16,64})\/?$/.exec(path);
+  if (share) return <Dashboard share={share[1]} />;
+
   let page;
   if (!me.loggedIn) {
     page = me.hosted ? <Landing /> : <Login onLogin={refresh} />;
@@ -78,7 +83,8 @@ export function App() {
   } else {
     const settings = /^\/site\/([\w-]+)\/settings\/?$/.exec(path);
     const site = /^\/site\/([\w-]+)\/?$/.exec(path);
-    page = settings ? <Settings siteId={settings[1]} /> : site ? <Dashboard siteId={site[1]} /> : <Sites />;
+    const workspace = /^\/settings\/?$/.test(path) && (!me.hosted || me.user?.admin);
+    page = settings ? <Settings siteId={settings[1]} /> : site ? <Dashboard siteId={site[1]} /> : workspace ? <Workspace /> : <Sites />;
   }
   return <MeContext.Provider value={{ me, refresh }}>{page}</MeContext.Provider>;
 }
