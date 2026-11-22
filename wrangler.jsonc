@@ -4,6 +4,8 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-09-01",
   "observability": { "enabled": true },
+  // Once an hour: daily totals, tracking checks, exchange rates, the weekly summary (src/worker/cron.ts).
+  "triggers": { "crons": ["7 * * * *"] },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

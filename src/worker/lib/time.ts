@@ -1,25 +1,53 @@
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
 /** Offset of `tz` from UTC in ms at `at` (positive east of UTC). */
 export function tzOffset(tz: string, at: number = Date.now()): number {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    }).formatToParts(new Date(at));
+    let f = formatters.get(tz);
+    if (!f) {
+      f = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        hourCycle: 'h23',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+      formatters.set(tz, f);
+    }
+    const parts = f.formatToParts(new Date(at));
     const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
     const asUTC = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
     return Math.round((asUTC - Math.floor(at / 1000) * 1000) / 60_000) * 60_000;
   } catch {
     return 0;
   }
+}
+
+/** Day number of `at` in the timezone: whole days since 1970-01-01, counted in site time. */
+export function dayNumber(at: number, tz: string): number {
+  return Math.floor((at + tzOffset(tz, at)) / DAY);
+}
+
+/** YYYY-MM-DD of a day number. */
+export function dayKey(n: number): string {
+  return new Date(n * DAY).toISOString().slice(0, 10);
+}
+
+/** Day number of a YYYY-MM-DD string. */
+export function dayOfKey(key: string): number {
+  return Math.round(Date.parse(key + 'T00:00:00Z') / DAY);
+}
+
+/** UTC timestamp at which day `n` starts in the timezone (same rule as the dashboard's ranges). */
+export function dayStart(n: number, tz: string): number {
+  const guess = n * DAY;
+  return guess - tzOffset(tz, guess - tzOffset(tz, guess) + HOUR);
 }
 
 /** Midnight (site time) of the day containing `at`, as a UTC timestamp. */

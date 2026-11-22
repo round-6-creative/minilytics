@@ -1,14 +1,11 @@
 import type { Context } from 'hono';
-import { getSite, type AppEnv, type Site } from './env';
+import { isAdminEmail, isHosted } from './auth';
+import { getSite, type AppEnv, type Env, type Site, type SiteWithOwner } from './env';
+import { convertMinor, currencyDecimals, formatMoney, loadRates, refreshRates } from './fx';
 import { verifyStandardWebhook, verifyStripeWebhook } from './lib/crypto';
+import { notify } from './notify';
 
-export function currencyDecimals(currency: string): number {
-  try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
-  } catch {
-    return 2;
-  }
-}
+export { currencyDecimals };
 
 interface PaymentInput {
   id: string;
@@ -26,14 +23,23 @@ interface PaymentInput {
   checkoutId?: string | null;
   productId?: string | null;
   renewal?: boolean;
+  /** Length of the billing period this payment covers, in days. */
+  periodDays?: number | null;
 }
 
 export type MatchedBy = 'metadata' | 'return_page' | 'customer' | 'email' | 'timing';
 
 /** The visit that gets the credit: the visitor's last visit that came from somewhere (last non-direct touch). */
 export function creditedSessionSql() {
-  return `SELECT id FROM sessions WHERE site_id = ? AND visitor_id = ? AND started_at <= ?
+  // The index is named because SQLite otherwise walks every earlier visit of the whole site.
+  return `SELECT id FROM sessions INDEXED BY sessions_visitor WHERE site_id = ? AND visitor_id = ? AND started_at <= ?
           ORDER BY (channel != 'Direct') DESC, started_at DESC LIMIT 1`;
+}
+
+/** First touch: the visitor's very first visit. Takes the same parameters as creditedSessionSql. */
+export function firstSessionSql() {
+  return `SELECT id FROM sessions INDEXED BY sessions_visitor WHERE site_id = ? AND visitor_id = ? AND started_at <= ?
+          ORDER BY started_at ASC LIMIT 1`;
 }
 
 /**
@@ -89,11 +95,16 @@ async function attribute(db: D1Database, site: Site, p: PaymentInput) {
   }
 
   let sessionId: string | null = null;
+  let firstSessionId: string | null = null;
   if (visitorId) {
-    const s = await db.prepare(creditedSessionSql()).bind(site.id, visitorId, p.ts + 60_000).first<{ id: string }>();
-    sessionId = s?.id ?? p.sessionId ?? null;
+    const [last, first] = await db.batch<{ id: string }>([
+      db.prepare(creditedSessionSql()).bind(site.id, visitorId, p.ts + 60_000),
+      db.prepare(firstSessionSql()).bind(site.id, visitorId, p.ts + 60_000),
+    ]);
+    sessionId = last.results[0]?.id ?? p.sessionId ?? null;
+    firstSessionId = first.results[0]?.id ?? sessionId;
   }
-  return { visitorId, sessionId, renewal, matchedBy, reason };
+  return { visitorId, sessionId, firstSessionId, renewal, matchedBy, reason };
 }
 
 const TIMING_WINDOW_MS = 3 * 3_600_000;
@@ -147,21 +158,61 @@ async function matchByTiming(db: D1Database, site: Site, p: PaymentInput): Promi
   };
 }
 
+/**
+ * A payment in another currency is stored in the site's currency (so revenue adds up) at the day's
+ * reference rate, with the original amount kept next to it. No rate: stored as charged.
+ */
+async function toSiteCurrency(db: D1Database, site: Site, amount: number, currency: string) {
+  const from = currency.toUpperCase();
+  if (from === site.currency) return { amount, currency: from, origAmount: null, origCurrency: null };
+  let rates = await loadRates(db);
+  // Only when no rates were ever fetched; a currency the source does not publish is not worth a fetch per payment.
+  if (!rates.size) {
+    try {
+      await refreshRates(db);
+      rates = await loadRates(db, true);
+    } catch {}
+  }
+  const converted = convertMinor(amount, from, site.currency, rates);
+  if (converted === null) return { amount, currency: from, origAmount: null, origCurrency: null };
+  return { amount: converted, currency: site.currency, origAmount: amount, origCurrency: from };
+}
+
+/** A refund in the original currency of a converted payment uses that payment's own rate. */
+function refundInSiteCurrency(
+  site: Site,
+  original: { amount: number; currency: string; orig_amount?: number | null; orig_currency?: string | null },
+  amount: number,
+  currency: string,
+) {
+  const cur = currency.toUpperCase();
+  if (original.orig_currency && original.orig_amount && cur === original.orig_currency && cur !== site.currency) {
+    return { amount: Math.round((Math.abs(amount) * original.amount) / original.orig_amount), currency: original.currency, origAmount: -Math.abs(amount), origCurrency: cur };
+  }
+  return { amount: Math.abs(amount), currency: cur, origAmount: null, origCurrency: null };
+}
+
 export async function recordPayment(db: D1Database, site: Site, p: PaymentInput) {
-  const { visitorId, sessionId, renewal, matchedBy } = await attribute(db, site, p);
+  const { visitorId, sessionId, firstSessionId, renewal, matchedBy } = await attribute(db, site, p);
+  const existed = await db.prepare('SELECT 1 FROM payments WHERE id = ?').bind(p.id).first();
+  const money = await toSiteCurrency(db, site, p.amount, p.currency);
   // Seen before (a retry, or Stripe's invoice.paid arriving before checkout.session.completed): fill in what
   // was missing, and let checkout metadata win over a weaker match.
   const better = `(payments.visitor_id IS NULL OR excluded.matched_by = 'metadata')`;
   const stmts = [
     db
       .prepare(
-        `INSERT INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, renewal, matched_by, subscription_id, checkout_id, product_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, renewal, matched_by, subscription_id, checkout_id, product_id,
+           first_session_id, period_days, orig_amount, orig_currency)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
+           first_session_id = CASE WHEN ${better} THEN COALESCE(excluded.first_session_id, payments.first_session_id) ELSE payments.first_session_id END,
            visitor_id = CASE WHEN ${better} THEN COALESCE(excluded.visitor_id, payments.visitor_id) ELSE payments.visitor_id END,
            session_id = CASE WHEN ${better} THEN COALESCE(excluded.session_id, payments.session_id) ELSE payments.session_id END,
            matched_by = CASE WHEN ${better} THEN COALESCE(excluded.matched_by, payments.matched_by) ELSE payments.matched_by END,
-           checkout_id = COALESCE(payments.checkout_id, excluded.checkout_id)
+           checkout_id = COALESCE(payments.checkout_id, excluded.checkout_id),
+           subscription_id = COALESCE(payments.subscription_id, excluded.subscription_id),
+           period_days = COALESCE(payments.period_days, excluded.period_days)
          WHERE payments.site_id = excluded.site_id`,
       )
       .bind(
@@ -169,9 +220,9 @@ export async function recordPayment(db: D1Database, site: Site, p: PaymentInput)
         site.id,
         p.provider,
         p.ts,
-        p.amount,
+        money.amount,
         p.kind,
-        p.currency.toUpperCase(),
+        money.currency,
         visitorId,
         sessionId,
         p.customerId ?? null,
@@ -182,6 +233,10 @@ export async function recordPayment(db: D1Database, site: Site, p: PaymentInput)
         p.subscriptionId ?? null,
         p.checkoutId ?? null,
         p.productId ?? null,
+        firstSessionId,
+        p.periodDays ?? null,
+        money.origAmount,
+        money.origCurrency,
       ),
   ];
   // A payment tells us who an anonymous visitor really is.
@@ -194,7 +249,68 @@ export async function recordPayment(db: D1Database, site: Site, p: PaymentInput)
     );
   }
   await db.batch(stmts);
-  return { visitorId, sessionId };
+  return { visitorId, sessionId, isNew: !existed, renewal, amount: money.amount, currency: money.currency };
+}
+
+/**
+ * Sites whose payments and alerts belong to the workspace's own notification channel. On a hosted install
+ * other accounts' sites are theirs, not the owner's to be told about.
+ */
+export function inWorkspace(env: Env, site: SiteWithOwner): boolean {
+  return !isHosted(env) || !site.owner_id || isAdminEmail(env, site.owner_email);
+}
+
+/** Tell the notification webhook about a new payment or refund: the amount and where the buyer came from. */
+async function announcePayment(
+  db: D1Database,
+  site: Site & { mute?: boolean },
+  origin: string,
+  p: { kind: 'payment' | 'refund'; amount: number; currency: string; renewal?: boolean; sessionId?: string | null },
+) {
+  if (site.mute) return;
+  const s = p.sessionId
+    ? await db
+        .prepare('SELECT source, channel, utm_campaign, ref, country FROM sessions WHERE site_id = ? AND id = ?')
+        .bind(site.id, p.sessionId)
+        .first<{ source: string; channel: string; utm_campaign: string | null; ref: string | null; country: string | null }>()
+    : null;
+  const amount = formatMoney(Math.abs(p.amount), p.currency);
+  const title =
+    p.kind === 'refund' ? `↩️ ${site.name}: ${amount} refunded` : `💰 ${site.name}: ${amount} ${p.renewal ? 'renewal' : 'new sale'}`;
+  const from = s
+    ? `Source: ${s.source}${s.utm_campaign || s.ref ? ` (${s.utm_campaign || s.ref})` : ''}${s.country ? ` · ${s.country}` : ''}`
+    : 'Source: not linked to a visit';
+  await notify(db, p.kind === 'refund' ? 'refund' : 'sale', title, `${from}\n${origin}/site/${site.id}`, {
+    site: site.name,
+    site_id: site.id,
+    amount: p.amount,
+    currency: p.currency,
+    source: s?.source ?? null,
+  });
+}
+
+/** Run after the response has gone out (falls back to nothing when there is no execution context, as in tests). */
+function later(c: Context<AppEnv>, work: Promise<unknown>) {
+  try {
+    c.executionCtx.waitUntil(work.catch(() => {}));
+  } catch {
+    work.catch(() => {});
+  }
+}
+
+/** Remember how the provider's last webhook went, for the tracking health check. */
+function markWebhook(db: D1Database, siteId: string, provider: string, ok: boolean, error: string | null = null, now = Date.now()) {
+  return db
+    .prepare(
+      ok
+        ? `INSERT INTO webhook_status (site_id, provider, last_ok_at, ok_count, fail_count) VALUES (?1, ?2, ?3, 1, 0)
+           ON CONFLICT (site_id, provider) DO UPDATE SET last_ok_at = ?3, ok_count = ok_count + 1, fail_count = 0`
+        : `INSERT INTO webhook_status (site_id, provider, last_fail_at, last_error, fail_count) VALUES (?1, ?2, ?3, ?4, 1)
+           ON CONFLICT (site_id, provider) DO UPDATE SET last_fail_at = ?3, last_error = ?4, fail_count = fail_count + 1`,
+    )
+    .bind(...(ok ? [siteId, provider, now] : [siteId, provider, now, error]))
+    .run()
+    .catch(() => {});
 }
 
 /** Try again to link payments that have no visitor yet (e.g. ones recorded before a fallback existed). */
@@ -223,8 +339,8 @@ export async function rematchPayments(db: D1Database, site: Site) {
     matched++;
     await db.batch([
       db
-        .prepare('UPDATE payments SET visitor_id = ?, session_id = ?, matched_by = ?, renewal = ? WHERE site_id = ? AND id = ?')
-        .bind(a.visitorId, a.sessionId, a.matchedBy, a.renewal ? 1 : 0, site.id, r.id),
+        .prepare('UPDATE payments SET visitor_id = ?, session_id = ?, first_session_id = ?, matched_by = ?, renewal = ? WHERE site_id = ? AND id = ?')
+        .bind(a.visitorId, a.sessionId, a.firstSessionId, a.matchedBy, a.renewal ? 1 : 0, site.id, r.id),
       db.prepare('INSERT OR IGNORE INTO visitors (site_id, id, first_seen) VALUES (?, ?, ?)').bind(site.id, a.visitorId, r.ts),
       db
         .prepare('UPDATE visitors SET email = COALESCE(email, ?), name = COALESCE(name, ?) WHERE site_id = ? AND id = ?')
@@ -310,8 +426,9 @@ export async function learnDodoProducts(db: D1Database, site: Site, products: st
 
 /** Dodo Payments webhook: POST /api/webhooks/dodo/:siteId */
 export async function handleDodoWebhook(c: Context<AppEnv>) {
-  const site = await getSite(c.env.DB, c.req.param('siteId')!);
-  if (!site) return c.json({ error: 'unknown site' }, 404);
+  const found = await getSite(c.env.DB, c.req.param('siteId')!);
+  if (!found) return c.json({ error: 'unknown site' }, 404);
+  const site = { ...found, mute: !inWorkspace(c.env, found) };
   if (!site.dodo_webhook_secret) return c.json({ error: 'webhook secret not configured for this site' }, 400);
 
   const body = await c.req.text();
@@ -324,7 +441,12 @@ export async function handleDodoWebhook(c: Context<AppEnv>) {
     },
     body,
   );
-  if (!ok) return c.json({ error: 'invalid signature' }, 401);
+  if (!ok) {
+    await markWebhook(c.env.DB, site.id, 'dodo', false, 'The signature did not match the signing secret saved for this site');
+    return c.json({ error: 'invalid signature' }, 401);
+  }
+  later(c, markWebhook(c.env.DB, site.id, 'dodo', true));
+  const origin = new URL(c.req.url).origin;
 
   const event = JSON.parse(body) as { type: string; timestamp?: string; data: Record<string, any> };
   const data = event.data ?? {};
@@ -364,35 +486,54 @@ export async function handleDodoWebhook(c: Context<AppEnv>) {
         .run();
       return c.json({ ok: true, pending: 'unknown product' });
     }
-    await recordPayment(c.env.DB, site, payment);
+    const res = await recordPayment(c.env.DB, site, payment);
+    if (res.isNew) later(c, announcePayment(c.env.DB, site, origin, { kind: 'payment', ...res }));
     if (learn) await learnDodoProducts(c.env.DB, site, products);
+  } else if (event.type.startsWith('subscription.') && str(data.subscription_id)) {
+    // Subscription events say how often it bills, which payments alone don't.
+    const unit = ({ day: 1, week: 7, month: 30, year: 365 } as Record<string, number>)[String(data.payment_frequency_interval ?? '').toLowerCase()];
+    const count = Number(data.payment_frequency_count) || 1;
+    if (unit) {
+      await c.env.DB.prepare('UPDATE payments SET period_days = ? WHERE site_id = ? AND subscription_id = ? AND period_days IS NULL')
+        .bind(unit * count, site.id, String(data.subscription_id))
+        .run();
+    }
   } else if (event.type === 'refund.succeeded') {
     const original = await c.env.DB.prepare('SELECT * FROM payments WHERE id = ? AND site_id = ?')
       .bind(String(data.payment_id), site.id)
-      .first<{ visitor_id: string | null; session_id: string | null; currency: string; amount: number }>();
+      .first<{ visitor_id: string | null; session_id: string | null; first_session_id: string | null; currency: string; amount: number; orig_amount: number | null; orig_currency: string | null }>();
     // A refund of a payment this site never recorded (another product, or before tracking) isn't this site's.
     if (!original) {
       await c.env.DB.prepare('DELETE FROM pending_payments WHERE site_id = ? AND payment_id = ?').bind(site.id, String(data.payment_id)).run();
       return c.json({ ok: true, ignored: 'unknown payment' });
     }
-    const amount = Number(data.amount) || original.amount || 0;
-    await c.env.DB.prepare(
-      `INSERT OR IGNORE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name)
-       VALUES (?, ?, 'dodo', ?, ?, 'refund', ?, ?, ?, ?, ?, ?)`,
+    // No amount on the event means the whole payment was refunded.
+    const money = Number(data.amount)
+      ? refundInSiteCurrency(site, original, Number(data.amount), String(data.currency ?? original.orig_currency ?? original.currency ?? site.currency))
+      : { amount: Math.abs(original.amount), currency: original.currency, origAmount: null, origCurrency: null };
+    const res = await c.env.DB.prepare(
+      `INSERT OR IGNORE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, first_session_id, orig_amount, orig_currency)
+       VALUES (?, ?, 'dodo', ?, ?, 'refund', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         String(data.refund_id ?? `refund_${data.payment_id}`),
         site.id,
         ts,
-        -Math.abs(amount),
-        String(data.currency ?? original.currency ?? site.currency).toUpperCase(),
+        -money.amount,
+        money.currency,
         original.visitor_id ?? null,
         original.session_id ?? null,
         str(customer.customer_id),
         str(customer.email)?.toLowerCase() ?? null,
         str(customer.name),
+        original.first_session_id ?? null,
+        money.origAmount,
+        money.origCurrency,
       )
       .run();
+    if (res.meta?.changes) {
+      later(c, announcePayment(c.env.DB, site, origin, { kind: 'refund', amount: money.amount, currency: money.currency, sessionId: original.session_id }));
+    }
   }
   // Every other event type is acknowledged so Dodo doesn't retry it.
   return c.json({ ok: true });
@@ -406,16 +547,41 @@ export function matchesStripeApp(stripeApp: string | null | undefined, type: str
   return (o.metadata?.app ?? details?.metadata?.app) === stripeApp;
 }
 
+interface StoredPayment {
+  id: string;
+  amount: number;
+  currency: string;
+  visitor_id: string | null;
+  session_id: string | null;
+  first_session_id?: string | null;
+  orig_amount?: number | null;
+  orig_currency?: string | null;
+}
+
+/** Days covered by a Stripe invoice's first line (about 30 for monthly, 365 for yearly), or null. */
+export function stripePeriodDays(invoice: Record<string, any>): number | null {
+  const period = invoice.lines?.data?.[0]?.period;
+  const days = Math.round((Number(period?.end) - Number(period?.start)) / 86_400);
+  return Number.isFinite(days) && days >= 1 && days <= 1100 ? days : null;
+}
+
 /** Stripe webhook: POST /api/webhooks/stripe/:siteId */
 export async function handleStripeWebhook(c: Context<AppEnv>) {
-  const site = await getSite(c.env.DB, c.req.param('siteId')!);
-  if (!site) return c.json({ error: 'unknown site' }, 404);
+  const found = await getSite(c.env.DB, c.req.param('siteId')!);
+  if (!found) return c.json({ error: 'unknown site' }, 404);
+  const site = { ...found, mute: !inWorkspace(c.env, found) };
   if (!site.stripe_webhook_secret) return c.json({ error: 'webhook secret not configured for this site' }, 400);
 
   const body = await c.req.text();
   if (!(await verifyStripeWebhook(site.stripe_webhook_secret, c.req.header('stripe-signature') ?? null, body))) {
+    await markWebhook(c.env.DB, site.id, 'stripe', false, 'The signature did not match the signing secret saved for this site');
     return c.json({ error: 'invalid signature' }, 401);
   }
+  later(c, markWebhook(c.env.DB, site.id, 'stripe', true));
+  const origin = new URL(c.req.url).origin;
+  const announce = (res: Awaited<ReturnType<typeof recordPayment>>) => {
+    if (res.isNew) later(c, announcePayment(c.env.DB, site, origin, { kind: 'payment', ...res }));
+  };
 
   const event = JSON.parse(body) as { type: string; data: { object: Record<string, any> } };
   const o = event.data?.object ?? {};
@@ -429,7 +595,7 @@ export async function handleStripeWebhook(c: Context<AppEnv>) {
     if (o.payment_status !== 'paid') return c.json({ ok: true, ignored: 'not paid yet' });
     // Payment links can't carry metadata, so the script puts the visitor in client_reference_id: ml_<vid>__<sid>.
     const ref = /^ml_([\w-]+?)__([\w-]+)$/.exec(o.client_reference_id ?? '');
-    await recordPayment(c.env.DB, site, {
+    announce(await recordPayment(c.env.DB, site, {
       // A subscription's first invoice also arrives as invoice.paid; the same id makes them one payment.
       id: (o.mode === 'subscription' ? str(o.invoice) : str(o.payment_intent)) ?? String(o.id),
       provider: 'stripe',
@@ -444,13 +610,13 @@ export async function handleStripeWebhook(c: Context<AppEnv>) {
       name: str(o.customer_details?.name),
       subscriptionId,
       checkoutId: str(o.id),
-    });
+    }));
   } else if (event.type === 'invoice.paid') {
     // One-time Checkout payments are counted above; here only subscription invoices (first payment and renewals).
     if (!String(o.billing_reason).startsWith('subscription') || !(Number(o.amount_paid) > 0)) {
       return c.json({ ok: true, ignored: 'not a subscription payment' });
     }
-    await recordPayment(c.env.DB, site, {
+    announce(await recordPayment(c.env.DB, site, {
       id: String(o.id),
       provider: 'stripe',
       ts,
@@ -462,35 +628,44 @@ export async function handleStripeWebhook(c: Context<AppEnv>) {
       name: str(o.customer_name),
       subscriptionId,
       renewal: o.billing_reason === 'subscription_cycle',
-    });
+      periodDays: stripePeriodDays(o),
+    }));
   } else if (event.type === 'charge.refunded') {
     const original =
       (await c.env.DB.prepare('SELECT * FROM payments WHERE site_id = ? AND id IN (?, ?)')
         .bind(site.id, str(o.payment_intent) ?? '', str(o.invoice) ?? '')
-        .first<{ id: string; visitor_id: string | null; session_id: string | null }>()) ??
+        .first<StoredPayment>()) ??
       // Newer API versions don't link a charge to its invoice; fall back to the customer's latest payment.
       (await c.env.DB.prepare("SELECT * FROM payments WHERE site_id = ? AND customer_id = ? AND kind = 'payment' ORDER BY ts DESC LIMIT 1")
         .bind(site.id, str(o.customer) ?? '')
-        .first<{ id: string; visitor_id: string | null; session_id: string | null }>());
+        .first<StoredPayment>());
     if (!original) return c.json({ ok: true, ignored: 'unknown payment' });
+    const money = refundInSiteCurrency(site, original, Number(o.amount_refunded) || 0, String(o.currency ?? site.currency));
+    const seen = await c.env.DB.prepare('SELECT amount FROM payments WHERE id = ?').bind(`${o.id}:refund`).first<{ amount: number }>();
     // amount_refunded is the running total, so a second partial refund replaces the row.
     await c.env.DB.prepare(
-      `INSERT OR REPLACE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name)
-       VALUES (?, ?, 'stripe', ?, ?, 'refund', ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, first_session_id, orig_amount, orig_currency)
+       VALUES (?, ?, 'stripe', ?, ?, 'refund', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         `${o.id}:refund`,
         site.id,
         Date.now(),
-        -Math.abs(Number(o.amount_refunded) || 0),
-        String(o.currency ?? site.currency).toUpperCase(),
+        -money.amount,
+        money.currency,
         original.visitor_id,
         original.session_id,
         str(o.customer),
         str(o.billing_details?.email)?.toLowerCase() ?? null,
         str(o.billing_details?.name),
+        original.first_session_id ?? null,
+        money.origAmount,
+        money.origCurrency,
       )
       .run();
+    if (!seen || seen.amount !== -money.amount) {
+      later(c, announcePayment(c.env.DB, site, origin, { kind: 'refund', amount: money.amount, currency: money.currency, sessionId: original.session_id }));
+    }
   }
   // Every other event type is acknowledged so Stripe doesn't retry it.
   return c.json({ ok: true });
@@ -530,7 +705,11 @@ export async function handlePaymentApi(c: Context<AppEnv>) {
     email: str(b.email)?.toLowerCase() ?? null,
     name: str(b.name),
     renewal: b.renewal === true,
+    subscriptionId: str(b.subscription_id),
+    periodDays: typeof b.period_days === 'number' && b.period_days >= 1 && b.period_days <= 1100 ? Math.round(b.period_days) : null,
   });
+  // The generic API has no owner lookup, so it only announces on a self-hosted install.
+  if (res.isNew && !isHosted(c.env)) later(c, announcePayment(c.env.DB, site, new URL(c.req.url).origin, { kind: refunded ? 'refund' : 'payment', ...res }));
   return c.json({ ok: true, attributed: !!res.sessionId, visitor_id: res.visitorId });
 }
 
@@ -546,7 +725,7 @@ export async function handleGoalApi(c: Context<AppEnv>) {
   const name = str(b?.name)?.slice(0, 64);
   if (!vid || !name) return c.json({ error: 'visitor_id and name are required' }, 400);
   const s = await c.env.DB.prepare(
-    'SELECT id, exit_page FROM sessions WHERE site_id = ? AND visitor_id = ? ORDER BY started_at DESC LIMIT 1',
+    'SELECT id, exit_page FROM sessions INDEXED BY sessions_visitor WHERE site_id = ? AND visitor_id = ? ORDER BY started_at DESC LIMIT 1',
   )
     .bind(site.id, vid)
     .first<{ id: string; exit_page: string }>();
