@@ -67,8 +67,21 @@ export function findKnownSource(key: string | null | undefined): KnownSource | u
   return KNOWN_SOURCES.find((s) => s.match.test(k));
 }
 
+/** Ad platforms recognised by the click id they add to the landing URL. */
+const AD_SOURCES: Record<string, { name: string; domain: string }> = {
+  gclid: { name: 'Google Ads', domain: 'ads.google.com' },
+  gbraid: { name: 'Google Ads', domain: 'ads.google.com' },
+  wbraid: { name: 'Google Ads', domain: 'ads.google.com' },
+  msclkid: { name: 'Microsoft Ads', domain: 'ads.microsoft.com' },
+  ttclid: { name: 'TikTok Ads', domain: 'tiktok.com' },
+  twclid: { name: 'X Ads', domain: 'x.com' },
+};
+
+/** Click ids looked for on the landing URL, in order. fbclid is on every Facebook link, paid or not. */
+export const CLICK_IDS = ['gclid', 'gbraid', 'wbraid', 'msclkid', 'ttclid', 'twclid', 'fbclid'] as const;
+
 export function domainForSource(name: string): string | undefined {
-  return KNOWN_SOURCES.find((s) => s.name === name)?.domain || undefined;
+  return (KNOWN_SOURCES.find((s) => s.name === name) ?? Object.values(AD_SOURCES).find((s) => s.name === name))?.domain || undefined;
 }
 
 export interface Attribution {
@@ -86,9 +99,18 @@ export function classify(input: {
   utmSource?: string | null;
   utmMedium?: string | null;
   ref?: string | null;
+  /** Name of the ad click id found on the landing URL (gclid, msclkid, ...), if any. */
+  clickId?: string | null;
 }): Attribution {
-  const { referrerDomain, utmSource, utmMedium, ref } = input;
+  const { referrerDomain, utmSource, utmMedium, ref, clickId } = input;
   const tag = utmSource || ref || null;
+  const ad = clickId ? AD_SOURCES[clickId] : undefined;
+  // An untagged ad click: the click id is the only sign it was paid (the referrer just says google.com).
+  if (ad && !tag) return { source: ad.name, channel: 'Paid', referrerDomain };
+  // In-app browsers often send no referrer; Facebook's click id still says where the visit came from.
+  if (clickId === 'fbclid' && !tag && !findKnownSource(referrerDomain)) {
+    return { source: 'Facebook', channel: utmMedium && PAID_MEDIUM.test(utmMedium) ? 'Paid' : 'Organic Social', referrerDomain };
+  }
   const known = findKnownSource(tag) ?? findKnownSource(referrerDomain);
 
   let source: string;
@@ -98,7 +120,7 @@ export function classify(input: {
   else source = 'Direct/None';
 
   let channel: Channel;
-  if (utmMedium && PAID_MEDIUM.test(utmMedium)) channel = 'Paid';
+  if ((utmMedium && PAID_MEDIUM.test(utmMedium)) || ad) channel = 'Paid';
   else if (utmMedium && EMAIL_MEDIUM.test(utmMedium)) channel = 'Email';
   else if (known) channel = known.channel;
   else if (utmMedium && SOCIAL_MEDIUM.test(utmMedium)) channel = 'Organic Social';

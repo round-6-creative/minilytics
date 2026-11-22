@@ -1,11 +1,12 @@
 import type { Context } from 'hono';
-import { classify } from '../shared/sources';
+import { classify, CLICK_IDS } from '../shared/sources';
 import { siteOwnerActive } from './auth';
 import { getSite, type AppEnv, type Site } from './env';
 import { isBot, parseUA } from './lib/ua';
-import { creditedSessionSql, dodoProductOfLink, learnDodoProducts } from './payments';
+import { creditedSessionSql, dodoProductOfLink, firstSessionSql, learnDodoProducts } from './payments';
+import { countCloudVisit, datacenterOf, hasExitMetrics, recordExit, recordForm, recordIssue, type ExitMetrics } from './signals';
 
-const TYPES = new Set(['pageview', 'goal', 'outbound', 'ping', 'identify']);
+const TYPES = new Set(['pageview', 'goal', 'outbound', 'ping', 'identify', 'error', 'form']);
 const MAX_PING_MS = 10 * 60_000;
 
 interface Payload {
@@ -21,7 +22,11 @@ interface Payload {
   d?: number;
   /** 1 when the site loads the script with data-cookieless: no vid/sid from the browser, the server derives them. */
   c?: number;
+  /** On an 'error' event: '404' for a missing page, otherwise a JavaScript error. */
+  k?: string;
 }
+
+type Body = Payload & ExitMetrics;
 
 const clip = (s: unknown, n = 255): string | null =>
   typeof s === 'string' && s.trim() ? s.trim().slice(0, n) : null;
@@ -51,7 +56,7 @@ export function belongsTo(hostname: string, domain: string): boolean {
 export async function handleEvent(c: Context<AppEnv>) {
   const raw = await c.req.text();
   if (raw.length > 8192) return c.body(null, 413);
-  let body: Payload;
+  let body: Body;
   try {
     body = JSON.parse(raw);
   } catch {
@@ -80,6 +85,8 @@ export async function handleEvent(c: Context<AppEnv>) {
   if (!belongsTo(url.hostname, site.domain)) return c.body(null, 403);
 
   const now = Date.now();
+  // Straight from a cloud provider's network: probably a script. The visit is marked, not dropped.
+  const cloud = datacenterOf((c.req.raw as { cf?: IncomingRequestCfProperties }).cf?.asn, c.req.raw.headers);
   let known = false;
   if (cookieless) {
     const salt = await dailySalt(c.env.DB, now);
@@ -88,7 +95,7 @@ export async function handleEvent(c: Context<AppEnv>) {
     known = !!open;
     body.sid = open ?? (await anonVisitorId(salt, site.id, body.vid, String(now)));
   }
-  await ingest(c.env.DB, site, body, url, ua, geoOf(c), now, known);
+  await ingest(c.env.DB, site, body, url, ua, geoOf(c), now, known, cloud);
   return c.body(null, 202);
 }
 
@@ -178,22 +185,45 @@ function geoOf(c: Context<AppEnv>): Geo {
 export async function ingest(
   db: D1Database,
   site: Site,
-  body: Payload,
+  body: Body,
   url: URL,
   ua: string,
   geo: Geo,
   now: number,
   known = false,
+  cloud: string | null = null,
 ) {
   const path = normalizePath(url.pathname);
   const { t, vid, sid } = body;
 
   if (t === 'ping') {
     const ms = Math.max(0, Math.min(MAX_PING_MS, Math.round(Number(body.d) || 0)));
-    await db
-      .prepare('UPDATE sessions SET duration = duration + ?, last_seen_at = ? WHERE site_id = ? AND id = ?')
-      .bind(ms, now, site.id, sid)
-      .run();
+    const stmts: D1PreparedStatement[] = [];
+    if (ms > 0) {
+      stmts.push(db.prepare('UPDATE sessions SET duration = duration + ?, last_seen_at = ? WHERE site_id = ? AND id = ?').bind(ms, now, site.id, sid));
+    }
+    // The last ping of a page also carries how far it was scrolled and how fast it loaded.
+    const exit = hasExitMetrics(body) ? recordExit(db, site, path, body, now) : null;
+    if (exit) stmts.push(exit);
+    if (stmts.length) await db.batch(stmts);
+    return;
+  }
+
+  // Errors, missing pages and forms are counters; they neither start a visit nor count as activity.
+  if (t === 'error') {
+    const notFound = body.k === '404';
+    const p = (body.p ?? {}) as Record<string, unknown>;
+    const key = notFound ? path : clip(body.n, 300);
+    if (!key) return;
+    const detail = notFound ? clip(p.ref, 300) : clip(p.src, 300);
+    await recordIssue(db, site, notFound ? '404' : 'error', key, detail, path, parseUA(ua).browser, now).run();
+    return;
+  }
+  if (t === 'form') {
+    const form = clip(body.n, 100);
+    const action = (body.p as Record<string, unknown> | undefined)?.a;
+    if (!form || (action !== 'start' && action !== 'submit')) return;
+    await recordForm(db, site, form, action, now).run();
     return;
   }
 
@@ -219,7 +249,7 @@ export async function ingest(
 
   const stmts: D1PreparedStatement[] = [];
   if (!existing) {
-    stmts.push(...newSession(db, site, body, url, path, ua, geo, now));
+    stmts.push(...newSession(db, site, body, url, path, ua, geo, now, cloud));
   }
 
   if (t === 'pageview') {
@@ -273,10 +303,11 @@ function claimPayment(db: D1Database, siteId: string, vid: string, url: URL, now
     db
       .prepare(
         `UPDATE payments SET visitor_id = ?, matched_by = 'return_page',
-           session_id = (${creditedSessionSql()})
+           session_id = (${creditedSessionSql()}),
+           first_session_id = (${firstSessionSql()})
          WHERE site_id = ? AND ? IN (id, subscription_id, checkout_id) AND visitor_id IS NULL`,
       )
-      .bind(vid, siteId, vid, now + 60_000, siteId, paymentId),
+      .bind(vid, siteId, vid, now + 60_000, siteId, vid, now + 60_000, siteId, paymentId),
     db
       .prepare(
         `UPDATE visitors SET email = COALESCE(email, (SELECT email FROM payments WHERE site_id = ? AND ? IN (id, subscription_id, checkout_id) LIMIT 1)),
@@ -312,6 +343,7 @@ function newSession(
   ua: string,
   geo: Geo,
   now: number,
+  cloud: string | null = null,
 ): D1PreparedStatement[] {
   let referrer: string | null = null;
   let referrerDomain: string | null = null;
@@ -338,7 +370,8 @@ function newSession(
     content: clip(q.get('utm_content'), 200),
   };
   const ref = clip(q.get('ref') ?? q.get('via'), 100);
-  const { source, channel } = classify({ referrerDomain, utmSource: utm.source, utmMedium: utm.medium, ref });
+  const clickId = CLICK_IDS.find((k) => q.get(k)) ?? null;
+  const { source, channel } = classify({ referrerDomain, utmSource: utm.source, utmMedium: utm.medium, ref, clickId });
   const { browser, os, device } = parseUA(ua, Number(body.sw) || undefined);
   const pageviews = body.t === 'pageview' ? 1 : 0;
 
@@ -348,8 +381,8 @@ function newSession(
       .prepare(
         `INSERT OR IGNORE INTO sessions (site_id, id, visitor_id, started_at, last_seen_at, pageviews, hostname, entry_page, exit_page,
           referrer, referrer_domain, source, channel, utm_source, utm_medium, utm_campaign, utm_term, utm_content, ref,
-          country, region, city, browser, os, device, lat, lon)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          country, region, city, browser, os, device, lat, lon, click_id, cloud)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         site.id,
@@ -378,7 +411,10 @@ function newSession(
         device,
         geo.lat,
         geo.lon,
+        clickId,
+        cloud,
       ),
+    ...(cloud ? [countCloudVisit(db, site, cloud, now)] : []),
     // Separate statement so concurrent first events (pageview + goal racing) never double count.
     ...(pageviews
       ? [db.prepare('UPDATE sessions SET pageviews = pageviews + 1 WHERE site_id = ? AND id = ?').bind(site.id, body.sid)]

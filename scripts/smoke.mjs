@@ -186,6 +186,98 @@ for (const g of ['hour', 'day', 'week', 'month']) {
 const rt = (await call(`/api/sites/${site.id}/realtime`)).body;
 assert(rt.visitors.some((v) => v.visitor_id === vid) && rt.feed.some((f) => f.type === 'payment'), `live view: ${rt.visitors.length} online, ${rt.feed.length} recent events`);
 
+// --- First touch next to last touch
+const firstTouch = (await call(`/api/sites/${site.id}/breakdown?period=today&dim=source&attr=first`)).body;
+assert(firstTouch.find((s) => s.label === 'X')?.revenue === x.revenue + 1050, 'first-touch model credits the first visit');
+assert(cust.every((c) => 'first_source' in c && 'last_source' in c), 'journey shows the first and the last source');
+
+// --- Page quality signals: scroll depth and speed, errors, missing pages, forms
+await event(site.id, { t: 'ping', u: 'https://smoke-test.com/pricing', d: 0, sd: 75, lcp: 1900, cls: 30, inp: 90, vid, sid });
+await event(site.id, { t: 'error', u: 'https://smoke-test.com/pricing', n: 'TypeError: boom', p: { src: '/app.js:1:2' }, vid, sid });
+await event(site.id, { t: 'error', u: 'https://smoke-test.com/gone', k: '404', p: { ref: 'https://smoke-test.com/' }, vid, sid });
+await event(site.id, { t: 'form', u: 'https://smoke-test.com/pricing', n: 'signup', p: { a: 'start' }, vid, sid });
+await event(site.id, { t: 'form', u: 'https://smoke-test.com/pricing', n: 'signup', p: { a: 'submit' }, vid, sid });
+const quality = (await call(`/api/sites/${site.id}/page-quality?period=today`)).body;
+assert(quality[0]?.path === '/pricing' && quality[0].scroll === 75 && quality[0].lcp === 1900 && quality[0].lcpGood === 1, 'scroll depth and page speed per page');
+const issues = (await call(`/api/sites/${site.id}/issues`)).body;
+assert(issues.some((i) => i.kind === 'error' && i.key === 'TypeError: boom') && issues.some((i) => i.kind === '404' && i.key === '/gone'), 'errors and missing pages listed');
+await call(`/api/sites/${site.id}/issues`, { method: 'DELETE', body: JSON.stringify({ kind: '404', key: '/gone' }) });
+assert((await call(`/api/sites/${site.id}/issues`)).body.length === 1, 'an issue can be dismissed');
+const forms = (await call(`/api/sites/${site.id}/forms?period=today`)).body;
+assert(forms[0]?.form === 'signup' && forms[0].starts === 1 && forms[0].submits === 1, 'form starts and submits');
+assert((await call(`/api/sites/${site.id}/overview?period=today`)).body.current.pageviews === o.current.pageviews + 12, 'signals do not count as pageviews');
+
+// --- Ad click ids
+await event(site.id, { t: 'pageview', u: 'https://smoke-test.com/?gclid=abc', r: 'https://www.google.com/', vid: crypto.randomUUID(), sid: crypto.randomUUID() });
+const channels = (await call(`/api/sites/${site.id}/breakdown?period=today&dim=source`)).body;
+assert(channels.some((c) => c.label === 'Google Ads'), 'an untagged ad click is recognised by its click id');
+
+// --- Revenue detail, retention, buyer pages, health
+const rev = (await call(`/api/sites/${site.id}/revenue?period=today`)).body;
+assert(rev.period.net === (await call(`/api/sites/${site.id}/overview?period=today`)).body.current.revenue, `revenue detail adds up (${rev.period.net})`);
+assert(rev.sources.some((s) => s.label === 'X' && s.revenue > 0) && rev.subscriptions.active >= 1, 'value by source and subscriptions');
+const audience = (await call(`/api/sites/${site.id}/audience?period=7d`)).body;
+assert(audience.daily.length === 7 && audience.daily[6].new > 0 && audience.cohorts.length >= 1, 'new/returning visitors and retention cohorts');
+const buyers = (await call(`/api/sites/${site.id}/buyer-pages?period=today`)).body;
+assert(buyers.buyers >= 1 && buyers.pages.some((p) => p.path === '/pricing'), 'pages buyers saw before paying');
+const health = (await call(`/api/sites/${site.id}/health`)).body;
+assert(health.checks.find((c) => c.id === 'events')?.state === 'ok' && health.checks.find((c) => c.id === 'webhook_dodo')?.state === 'ok', 'tracking health');
+assert(health.checks.some((c) => c.id === 'attribution'), 'health reports how many payments are linked');
+
+// --- Portfolio agrees with the site's own dashboard
+const folio = (await call('/api/portfolio?period=today')).body;
+const card = folio.sites.find((s) => s.id === site.id);
+const today = (await call(`/api/sites/${site.id}/overview?period=today`)).body.current;
+assert(card.current.visitors === today.visitors && card.current.revenue === today.revenue && card.current.customers === today.customers, `portfolio matches the dashboard (${card.current.visitors} visitors)`);
+const summary = (await call(`/api/sites/${site.id}/summary?period=today`)).body;
+assert(summary.current.visitors === today.visitors && summary.series.length === 1, 'site summary from daily rows');
+
+// --- Notes on the chart, saved views
+const note = (await call(`/api/sites/${site.id}/annotations`, { method: 'POST', body: JSON.stringify({ day: '2026-01-15', text: 'Launch' }) })).body;
+assert((await call(`/api/sites/${site.id}/annotations`)).body.some((a) => a.id === note.id && a.text === 'Launch'), 'note added');
+assert((await call(`/api/sites/${site.id}/annotations`, { method: 'POST', body: JSON.stringify({ day: 'soon', text: 'x' }) })).status === 400, 'a note needs a real date');
+const savedView = (await call(`/api/sites/${site.id}/views`, { method: 'POST', body: JSON.stringify({ name: 'From X', query: 'period=7d&filters=%7B%22source%22%3A%22X%22%7D' }) })).body;
+assert((await call(`/api/sites/${site.id}/views`)).body[0]?.id === savedView.id, 'view saved');
+
+// --- Read-only share link: totals yes, people no
+const share = (await call(`/api/sites/${site.id}/shares`, { method: 'POST', body: JSON.stringify({ name: 'Client' }) })).body;
+const anon = (path) => fetch(BASE + path).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
+assert((await anon(`/api/share/${share.token}`)).body.name === 'Smoke', 'share link opens without login');
+assert((await anon(`/api/share/${share.token}/overview?period=today`)).body.current.visitors === today.visitors, 'share link shows totals');
+assert((await anon(`/api/share/${share.token}/breakdown?period=today&dim=source`)).body.length > 0, 'share link shows breakdowns');
+for (const hidden of ['customers', 'visitors', 'realtime', 'health', 'shares', 'rematch']) {
+  assert((await anon(`/api/share/${share.token}/${hidden}`)).status === 404, `share link has no /${hidden}`);
+}
+assert(!JSON.stringify((await anon(`/api/share/${share.token}/revenue?period=today`)).body).includes('jane'), 'share link reveals no customer');
+await call(`/api/sites/${site.id}/shares/${share.token}`, { method: 'DELETE' });
+assert((await anon(`/api/share/${share.token}`)).status === 404, 'a removed share link stops working');
+
+// --- Read tokens: REST reports and the MCP endpoint
+assert((await anon('/api/v1/reports/portfolio')).status === 401, 'reports need a token');
+const tok = (await call('/api/workspace/tokens', { method: 'POST', body: JSON.stringify({ name: 'smoke' }) })).body;
+const withToken = (path, init = {}) => fetch(BASE + path, { ...init, headers: { authorization: `Bearer ${tok.token}`, 'content-type': 'application/json' } }).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
+assert((await withToken('/api/v1/reports')).body.some((r) => r.name === 'portfolio'), 'report list');
+const viaApi = (await withToken(`/api/v1/reports/breakdown?site=smoke-test.com&dimension=source&period=today&filters=${encodeURIComponent('{"country":"nowhere"}')}`)).body;
+assert(Array.isArray(viaApi.rows), 'breakdown report with filters');
+assert((await withToken('/api/v1/reports/breakdown?site=smoke-test.com&dimension=source&period=custom&from=2020-01-01&to=2026-01-01')).status === 400, 'long raw ranges are refused');
+const rpc = (method, params, id = 1) => withToken('/api/mcp', { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
+assert((await rpc('initialize', { protocolVersion: '2025-03-26' })).body.result.serverInfo.name === 'minilytics', 'MCP initialize');
+assert((await rpc('tools/list')).body.result.tools.length >= 8, 'MCP lists its tools');
+const mcpCall = (await rpc('tools/call', { name: 'site_summary', arguments: { site: 'Smoke', period: 'today' } })).body.result;
+assert(JSON.parse(mcpCall.content[0].text).current.visitors === today.visitors, 'MCP tool call returns the same numbers');
+assert((await anon('/api/mcp')).status === 405, 'MCP is POST only');
+await call(`/api/workspace/tokens/${(await call('/api/workspace/tokens')).body.find((t) => t.name === 'smoke').id}`, { method: 'DELETE' });
+assert((await withToken('/api/v1/reports')).status === 401, 'a deleted token stops working');
+
+// --- Workspace: notifications and the scheduled checks
+assert((await call('/api/workspace/notifications', { method: 'PATCH', body: JSON.stringify({ url: 'http://insecure.example.com/hook' }) })).status === 400, 'webhook must be https');
+const prefs = (await call('/api/workspace/notifications', { method: 'PATCH', body: JSON.stringify({ spike: false }) })).body;
+assert(prefs.spike === false && prefs.sale === true, 'notification switches are saved');
+await call('/api/workspace/notifications', { method: 'PATCH', body: JSON.stringify({ spike: true }) });
+const checks = (await call('/api/workspace/run-checks', { method: 'POST' })).body;
+assert(checks.sites >= 1 && checks.errors.length === 0, `scheduled checks run clean (${JSON.stringify(checks.errors)})`);
+
 await call(`/api/sites/${site.id}`, { method: 'DELETE' });
 assert((await call(`/api/sites/${site.id}`)).status === 404, 'site deleted');
+assert(!(await call('/api/portfolio?period=today')).body.sites.some((s) => s.id === site.id), 'and gone from the portfolio');
 console.log('\nAll smoke tests passed');
