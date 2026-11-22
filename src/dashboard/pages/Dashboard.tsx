@@ -1,8 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { navigate } from '../App';
 import { GoalsPanel } from '../components/GoalsPanel';
+import { InsightsPanel } from '../components/InsightsPanel';
+import { Logo } from '../components/Logo';
 import { OverviewCard } from '../components/OverviewCard';
 import { Panel, renderLabel } from '../components/Panel';
+import { RevenuePanel } from '../components/RevenuePanel';
 import { Toolbar } from '../components/Toolbar';
 import { VisitorModal } from '../components/VisitorModal';
 import { qs, type Overview, type Site } from '../lib/api';
@@ -31,10 +34,14 @@ const FILTER_LABELS: Record<string, { label: string; dim: string }> = {
   page: { label: 'Visited page', dim: 'page' },
   entry_page: { label: 'Entry page', dim: 'entry_page' },
   hostname: { label: 'Hostname', dim: 'hostname' },
+  cloud: { label: 'Network', dim: 'cloud' },
   goal: { label: 'Completed goal', dim: 'goal' },
 };
 
-export function Dashboard({ siteId }: { siteId: string }) {
+/** A site's dashboard. With `share`, the read-only version behind a share link: totals only, no login. */
+export function Dashboard({ siteId, share }: { siteId?: string; share?: string }) {
+  const readonly = !!share;
+  const base = share ? `/api/share/${share}` : `/api/sites/${siteId}`;
   const [q, update] = useQueryState();
   const [reloadKey, setReloadKey] = useState(0);
   const [visitor, setVisitor] = useState<string | null>(null);
@@ -42,16 +49,19 @@ export function Dashboard({ siteId }: { siteId: string }) {
 
   // "M" opens the live map, like DataFast.
   useEffect(() => {
+    if (readonly) return;
     const on = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (e.key.toLowerCase() === 'm' && !e.metaKey && !e.ctrlKey && !/INPUT|TEXTAREA|SELECT/.test(t.tagName)) setLive(true);
     };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
-  }, []);
-  const { data: sites } = useApi<Site[]>('/api/sites');
-  const site = sites?.find((s) => s.id === siteId);
-  const { data: overview, loading } = useApi<Overview>(site ? `/api/sites/${siteId}/overview?${qs(q)}` : null, reloadKey);
+  }, [readonly]);
+  const { data: ownSites } = useApi<Site[]>(readonly ? null : '/api/sites');
+  const { data: shared, error: shareError } = useApi<Site>(share ? base : null);
+  const sites = readonly ? (shared ? [shared] : null) : ownSites;
+  const site = readonly ? shared ?? undefined : sites?.find((s) => s.id === siteId);
+  const { data: overview, loading, error: overviewError } = useApi<Overview>(site ? `${base}/overview?${qs(q)}` : null, reloadKey);
 
   const addFilter = useCallback((key: string, value: string) => update({ filters: { ...q.filters, [key]: value } }), [q.filters, update]);
   const removeFilter = (key: string) => {
@@ -63,6 +73,8 @@ export function Dashboard({ siteId }: { siteId: string }) {
     if (!site) return null;
     const decimals = overview?.decimals ?? 2;
     return {
+      base,
+      readonly,
       site,
       q,
       reloadKey,
@@ -71,8 +83,16 @@ export function Dashboard({ siteId }: { siteId: string }) {
       addFilter,
       openVisitor: setVisitor,
     };
-  }, [site, q, reloadKey, overview?.decimals, addFilter]);
+  }, [base, readonly, site, q, reloadKey, overview?.decimals, addFilter]);
 
+  if (share && shareError) {
+    return (
+      <div className="mx-auto max-w-md px-6 py-24 text-center">
+        <Logo />
+        <p className="mt-6 text-stone-600">This shared dashboard is not available any more. Ask whoever sent you the link for a new one.</p>
+      </div>
+    );
+  }
   if (sites && !site) {
     return (
       <div className="p-10 text-center">
@@ -97,7 +117,10 @@ export function Dashboard({ siteId }: { siteId: string }) {
           onRefresh={() => setReloadKey((k) => k + 1)}
           onLive={() => setLive(true)}
           loading={loading}
+          readonly={readonly}
+          base={base}
         />
+        {overviewError && <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900">{overviewError}</p>}
 
         {Object.keys(q.filters).length > 0 && (
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -149,22 +172,38 @@ export function Dashboard({ siteId }: { siteId: string }) {
               { label: 'Browser', dim: 'browser', filter: 'browser' },
               { label: 'OS', dim: 'os', filter: 'os' },
               { label: 'Device', dim: 'device', filter: 'device' },
+              { label: 'Network', dim: 'cloud', filter: 'cloud' },
             ]}
           />
+        </div>
+
+        <div className="mt-5">
+          <RevenuePanel />
         </div>
 
         <div className="mt-5">
           <GoalsPanel totalVisitors={overview?.current.visitors ?? 0} />
         </div>
 
+        <div className="mt-5">
+          <InsightsPanel />
+        </div>
+
         <p className="mt-8 text-center text-xs text-stone-400">
-          Times in {site.timezone} · Revenue in {site.currency} ·{' '}
-          <button className="underline-offset-2 hover:underline" onClick={() => navigate(`/site/${site.id}/settings`)}>
-            Settings & install
-          </button>
+          Times in {site.timezone} · Revenue in {site.currency}
+          {readonly ? (
+            <> · Read-only view shared with Minilytics</>
+          ) : (
+            <>
+              {' · '}
+              <button className="underline-offset-2 hover:underline" onClick={() => navigate(`/site/${site.id}/settings`)}>
+                Settings & install
+              </button>
+            </>
+          )}
         </p>
       </div>
-      {live && (
+      {live && !readonly && (
         <Suspense fallback={<div className="fixed inset-0 z-50 bg-[#070b1a]" />}>
           <LiveView onClose={() => setLive(false)} />
         </Suspense>

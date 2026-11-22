@@ -213,7 +213,7 @@ export async function weeklyDigest(db: D1Database, sites: Site[], days: Map<stri
     const prevRevenue = inWeek(t - 14, t - 8).reduce((a, p) => a + p.amount, 0);
     const sales = curPays.filter((p) => p.kind === 'payment').length;
     if (!cur.visitors && !prev.visitors && !revenue) continue;
-    let text = `• ${site.name}: ${cur.visitors} visitor${cur.visitors === 1 ? '' : 's'}${pct(cur.visitors, prev.visitors)}`;
+    let text = `• ${site.name}: ${cur.visitors.toLocaleString('en')} visitor${cur.visitors === 1 ? '' : 's'}${pct(cur.visitors, prev.visitors)}`;
     if (revenue) text += `, ${formatMoney(revenue, site.currency)}${pct(revenue, prevRevenue)} from ${sales} payment${sales === 1 ? '' : 's'}`;
     else if (prevRevenue > 0) text += `, no revenue (${formatMoney(prevRevenue, site.currency)} the week before)`;
     lines.push({ text, revenue, visitors: cur.visitors });

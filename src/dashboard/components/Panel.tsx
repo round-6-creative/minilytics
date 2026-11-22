@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { qs, type BreakdownRow } from '../lib/api';
 import { useDash } from '../lib/context';
+import { downloadCsv } from '../lib/csv';
 import { countryName, fmtNumber, fmtPct } from '../lib/format';
 import { useApi } from '../lib/useApi';
 import { BrowserIcon, ChannelIcon, DeviceIcon, Favicon, Flag, OSIcon, SourceIcon } from './Icons';
@@ -68,6 +69,8 @@ export function renderLabel(dim: string, row: Pick<BreakdownRow, 'label' | 'extr
           {text(l)}
         </>
       );
+    case 'cloud':
+      return text(l ? `☁️ ${l}` : 'Home, office and mobile networks');
     case 'hostname':
       return (
         <>
@@ -138,13 +141,13 @@ function Bars({ rows, dim, tab, sort, limit, onPick }: { rows: BreakdownRow[]; d
 }
 
 export function Panel({ tabs }: { tabs: TabDef[] }) {
-  const { site, q, reloadKey, addFilter, money } = useDash();
+  const { base, site, q, reloadKey, addFilter, money, decimals } = useDash();
   const [active, setActive] = useState(tabs[0].dim);
   const [sort, setSort] = useState<'visitors' | 'revenue'>('visitors');
   const [details, setDetails] = useState(false);
   const [search, setSearch] = useState('');
   const tab = tabs.find((t) => t.dim === active)!;
-  const { data, loading, error } = useApi<BreakdownRow[]>(`/api/sites/${site.id}/breakdown?${qs(q, { dim: active })}`, reloadKey);
+  const { data, loading, error } = useApi<BreakdownRow[]>(`${base}/breakdown?${qs(q, { dim: active })}`, reloadKey);
 
   const pick = (r: BreakdownRow) => {
     if (!tab.filter) return;
@@ -183,7 +186,22 @@ export function Panel({ tabs }: { tabs: TabDef[] }) {
         </button>
       )}
       <Modal open={details} onClose={() => setDetails(false)} title={tab.label} width="max-w-3xl">
-        <input className="input mb-4" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
+        <div className="mb-4 flex gap-2">
+          <input className="input" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
+          <button
+            className="btn shrink-0"
+            title="Download these rows as a CSV file"
+            onClick={() =>
+              downloadCsv(
+                `${site.domain}-${active}-${q.period}.csv`,
+                [tab.label, 'Visitors', 'Pageviews', `Revenue (${site.currency})`, 'Customers'],
+                filtered.map((r) => [r.label ?? '', r.visitors, r.pageviews ?? '', (r.revenue / 10 ** decimals).toFixed(decimals), r.customers]),
+              )
+            }
+          >
+            ⤓ CSV
+          </button>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>

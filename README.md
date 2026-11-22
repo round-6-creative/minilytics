@@ -4,50 +4,10 @@ Revenue-first web analytics for your own websites, inspired by DataFast. It show
 tweet, article, Google page or AI assistant), what they did, and **which source made you money**. It runs on
 Cloudflare's free plan.
 
+This is Round 6's copy, used for its own products. It started as a fork of
+[surendrapandar/minilytics](https://github.com/surendrapandar/minilytics).
+
 ![Dashboard](docs/dashboard.png)
-
-## Sponsors
-
-<table>
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://snitchfeed.com/?utm_source=minilytics&utm_medium=sponsorship&utm_campaign=oss-sponsor&utm_content=github-readme"><img src="docs/sponsors/snitchfeed.png" width="64" height="64" alt="SnitchFeed"></a><br>
-      <a href="https://snitchfeed.com/?utm_source=minilytics&utm_medium=sponsorship&utm_campaign=oss-sponsor&utm_content=github-readme"><b>SnitchFeed</b></a><br>
-      <sub>Agentic social listening for GTM: X, LinkedIn, Reddit &amp; more</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://www.opensourcealternatives.to/?ref=minilytics-github"><img src="docs/sponsors/opensourcealternatives.png" width="64" height="64" alt="Open Source Alternatives"></a><br>
-      <a href="https://www.opensourcealternatives.to/?ref=minilytics-github"><b>Open Source Alternatives</b></a><br>
-      <sub>Find Best Open Source Alternatives to Paid Software</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://github.com/twf-nikhila/Awesome-Black-Friday-Cyber-Monday-deals"><img src="docs/sponsors/black-friday-deals.png" width="64" height="64" alt="Awesome Black Friday Deals"></a><br>
-      <a href="https://github.com/twf-nikhila/Awesome-Black-Friday-Cyber-Monday-deals"><b>Awesome Black Friday Deals</b></a><br>
-      <sub>Black Friday &amp; Cyber Monday deals for devs &amp; indie makers</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="33%">
-      <a href="https://diskmate.app/?ref=minilytics-github"><img src="docs/sponsors/diskmate.svg" width="64" height="64" alt="DiskMate"></a><br>
-      <a href="https://diskmate.app/?ref=minilytics-github"><b>DiskMate</b></a><br>
-      <sub>Disk space analyzer &amp; cleaner for Mac</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://pastebuddy.app/?ref=minilytics-github"><img src="docs/sponsors/pastebuddy.svg" width="64" height="64" alt="PasteBuddy"></a><br>
-      <a href="https://pastebuddy.app/?ref=minilytics-github"><b>PasteBuddy</b></a><br>
-      <sub>Clipboard history for Mac: never lose what you copy</sub>
-    </td>
-    <td align="center" width="33%">
-      <a href="https://checkout.dodopayments.com/buy/pdt_0NqWPM98xzStsrTUMLyxE?quantity=1"><b>Your logo here</b></a><br>
-      <sub>Reach indie hackers and developers who self-host their analytics</sub><br><br>
-      <a href="https://checkout.dodopayments.com/buy/pdt_0NqWPM98xzStsrTUMLyxE?quantity=1">Become a sponsor →</a>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <a href="https://checkout.dodopayments.com/buy/pdt_0NqWPM98xzStsrTUMLyxE?quantity=1"><img src="https://img.shields.io/badge/Become%20a%20sponsor-%2419%2Fmonth%20early%20price-e07b5f?style=for-the-badge" alt="Become a sponsor: $19/month early price"></a>
-</p>
 
 ## What it tracks
 
@@ -61,7 +21,20 @@ Cloudflare's free plan.
 - **Live globe** (press `M`): every visitor on your site right now, on a 3D globe or 2D map, with a live feed of page views, goals and payments, optional sounds, light/dark map and fullscreen. Map tiles from [OpenFreeMap](https://openfreemap.org), free with no API key
 - Anonymous visitors get friendly, stable names like "brown fox"
 - Click any row to filter the whole dashboard (for example "only visitors from the launch tweet")
-- Multiple websites, one login
+- **Every site on one screen**: revenue, visitors, conversion and a trend line per site, against the previous period,
+  with totals across sites and who is online now
+- **Revenue detail**: new versus repeat revenue, refunds, estimated MRR and churn, value per customer, and customers and
+  revenue by source, campaign, country or entry page
+- **First touch or last touch**: switch which visit gets the credit for a payment
+- **Who comes back**: new and returning visitors per day, and weekly retention cohorts
+- **What buyers read**: the pages customers saw before paying, against how many of all visitors saw them
+- **Page quality**: how far each page is scrolled, Core Web Vitals (LCP, INP, CLS) from visitors' own browsers, form
+  starts and submits, JavaScript errors and missing pages (404)
+- **Alerts**: a busy site stops sending visits, a payment webhook keeps being rejected, traffic spikes. Shown on the home
+  page and sent to Slack, Discord, Telegram, ntfy or any webhook, together with each sale and a weekly summary
+- **Notes on the chart** (a launch, a post), **saved views**, **CSV export** of any breakdown and of payments
+- **Read-only share links** for a client or partner: totals and sources, never visitors or customers
+- **Read access for AI agents**: an MCP server and a small HTTP API with read-only tokens
 
 ## Deploy for free (about 10 minutes)
 
@@ -74,7 +47,7 @@ Run these commands in a terminal on your computer. You only do this once; afterw
 **1. Download the code and log in to Cloudflare**
 
 ```bash
-git clone https://github.com/surendrapandar/minilytics.git
+git clone https://github.com/round-6-creative/minilytics.git
 cd minilytics
 npm install
 npx wrangler login          # opens your browser; click "Allow"
@@ -131,6 +104,7 @@ npm run deploy
 | 100,000 D1 rows written/day | About 10k pageviews per day |
 | 5M D1 rows read/day | A dashboard load reads roughly 10 times the sessions in the range, so with 10k visitors/month that's hundreds of loads a day |
 | 5 GB D1 storage | Years of data at side-project traffic |
+| Cron triggers | One job an hour (daily totals, tracking checks, exchange rates, the weekly summary) |
 
 At 5–10k visitors a month you'll use a few percent of this. If you outgrow it, Cloudflare's Workers Paid plan is $5/month.
 
@@ -172,6 +146,13 @@ The Terms, Privacy and Refund pages (`/terms`, `/privacy`, `/refund`) are plain-
 - **Identify logged-in users:** `window.minilytics('identify', { user_id, email, name })`
 - **Ignore your own visits:** open `https://yoursite.com/?ml_ignore=true` once per browser
 - **Single-page apps** (Next.js, React Router…) are handled automatically
+- **Page quality** is measured without any setup: scroll depth, page speed, JavaScript errors, missing pages and forms.
+  Switch any of them off with `data-disable="errors, forms, vitals, scroll, 404"`.
+  - A page counts as missing when its title starts with "404" or says "page not found", or when it carries
+    `data-ml-404` (or `<meta name="minilytics:404">`), which is the reliable way.
+  - Forms are named by `data-ml-form`, then `id`, `name` or the path they post to. `data-ml-ignore` skips a form.
+    Only the form's name is sent, never what was typed.
+  - Error reports carry the message and file location, at most five different ones per page load.
 - **Subdomains:** `app.yoursite.com` and `yoursite.com` share the same visitor, because the cookie is set on the root domain
 - **No cookies:** add `data-cookieless`. The script then sets no cookies and stores nothing. The server counts a visitor
   from a hash of their IP, user agent and a random salt that is replaced every UTC day and the old one deleted, so the
@@ -243,6 +224,23 @@ Selling other products from the same Stripe account? Every webhook receives all 
 Checkout Session and to `subscription_data.metadata`, then enter that value in the site's Stripe settings. Payments
 without it are ignored.
 
+### First touch and last touch
+
+Every payment keeps two visits: the last one that came from somewhere (the default credit) and the visitor's very first.
+The **Last touch / First touch** switch in the dashboard decides which one the revenue columns, the breakdowns and the
+revenue panel use. The Journey list shows both when they differ.
+
+### Subscriptions and currencies
+
+MRR is worked out from payments: a subscription is active while the period its last payment covers (plus a few days) has
+not run out and that payment was not refunded. Stripe invoices carry the period; Dodo sends it on its `subscription.*`
+events, so subscribe the webhook to those too. A subscription with one payment and no period on record is counted as
+monthly and the figure is labelled an estimate. There is no cancellation event, so a cancelled subscription counts until
+the time it paid for ends.
+
+A payment in another currency is stored in the site's currency at that day's reference rate (European Central Bank), with
+the amount actually charged kept next to it.
+
 ### How credit is given
 
 A payment goes to the paying visitor's last visit that came from a real source (last non-direct
@@ -270,8 +268,47 @@ No analytics tool is 100% accurate. These are the main gaps and how this project
   rewrite). Payments are always recorded by the webhook, even when the visitor's browser blocked tracking.
 - **Safari** keeps cookies set by JavaScript for at most 7 days. A Safari visitor who returns after more than a week counts as new. The
   email fallback above recovers most of these payments.
-- **Bots** are filtered by user agent and the `navigator.webdriver` flag.
+- **Bots** are filtered by user agent and the `navigator.webdriver` flag. Visits that come straight from a cloud
+  provider's network (Amazon, Google Cloud, Azure, DigitalOcean, Hetzner and others) are most likely scripts too. They
+  are marked and counted, not dropped, because a person on a cloud desktop or a self-hosted VPN looks the same. See them
+  under **Network** in the browser panel and click to filter.
 - Revenue in a different currency than the site's is converted only when Dodo gives a settlement amount in the site's currency.
+
+## Alerts and notifications
+
+Once an hour Minilytics checks every site. It raises an alert when a site that normally gets visits has had none for far
+longer than usual, when a payment webhook is rejected three times in a row, and when the last 24 hours brought more than
+three times a normal day. On Monday morning it writes a summary of the week per site. Alerts show on the home page.
+
+To get them in a chat, open **Workspace** on the home page and paste a webhook address (Slack, Discord, Telegram, ntfy or
+any https address that accepts a JSON POST). Each payment and refund is sent too, with the source that brought the
+customer. Messages never include a customer's name or email.
+
+## Read access for AI agents and scripts
+
+Create a read token in **Workspace**. It can read every site's statistics and nothing else.
+
+```bash
+# MCP (Claude Code shown; any MCP client that speaks HTTP works)
+claude mcp add --transport http minilytics https://YOUR-HOST/api/mcp --header "Authorization: Bearer mlr_..."
+
+# or plain HTTP
+curl -H "Authorization: Bearer mlr_..." "https://YOUR-HOST/api/v1/reports/portfolio?period=30d"
+curl -H "Authorization: Bearer mlr_..." "https://YOUR-HOST/api/v1/reports"   # every report and its parameters
+```
+
+Reports: `list_sites`, `portfolio`, `site_summary`, `breakdown`, `payments`, `revenue`, `tracking_health`,
+`page_quality`. Money is in minor units (cents) of the site's currency. Customer names and emails are never returned.
+
+Reports that read individual visits (`breakdown`, `payments`) cover at most 92 days per call; `site_summary` and
+`portfolio` are answered from daily totals and work for any range. A token has a daily allowance, charged by how many
+days of visits a call reads, so an agent cannot use up the database's daily read limit.
+
+## Share a dashboard
+
+Site settings → **Share a read-only dashboard** creates a link that opens without a login. It shows totals, sources,
+pages, goals, funnels and revenue for up to 90 days at a time. It never shows visitors, customers, the live view or
+settings. Deleting the link stops it at once.
 
 ## Local development
 
@@ -282,15 +319,16 @@ npm run build && npm run dev:api      # http://localhost:8787
 npm run dev:web                       # optional: hot-reloading dashboard on http://localhost:5173
 
 npm run seed                          # optional: 30 days of demo data ("ShipKit" site)
-npm test                              # unit tests
-npm run smoke                         # end-to-end test against the running dev server
+npm test                              # unit tests, including database code against SQLite with every migration applied
+npm run smoke                         # end-to-end test against the running dev server (use a fresh local database)
 node scripts/smoke-hosted.mjs         # hosted-mode test (see the comment at the top for how to start it)
 ```
 
 ## How it's built
 
-- `public/js/script.js`: the tracker, 9 KB (about 3.5 KB gzipped). It handles cookies, pageviews, engaged time, goals, outbound links and Dodo link tagging
-- `src/worker`: a Hono app on Cloudflare Workers that handles event ingestion, the Dodo webhook, the payments and goals API, and stats queries on D1 (SQLite)
+- `public/js/script.js`: the tracker, 17 KB (about 6 KB gzipped). It handles cookies, pageviews, engaged time, goals, outbound links, checkout link tagging, scroll depth, page speed, errors and forms
+- `src/worker`: a Hono app on Cloudflare Workers that handles event ingestion, the payment webhooks, the payments and goals API, stats queries on D1 (SQLite), the hourly job (`cron.ts`) and the read API and MCP endpoint (`agent.ts`)
+- `daily_stats` (`rollups.ts`): one row per site and day, with a count of that day's visitors by how long ago they last came. That makes unique visitors over any range of days an exact sum of a few rows, which is what the home page, the summaries and the checks read
 - `src/dashboard`: the React dashboard (Vite, Tailwind, Recharts), served as static files by the same Worker
 - `migrations/`: the database schema
 

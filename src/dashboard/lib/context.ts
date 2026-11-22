@@ -2,6 +2,10 @@ import { createContext, useContext } from 'react';
 import type { Query, Site } from './api';
 
 export interface Dash {
+  /** Where this dashboard's data comes from: /api/sites/<id>, or /api/share/<token> for a shared link. */
+  base: string;
+  /** A shared link: totals only, nothing can be changed and no visitor is shown. */
+  readonly: boolean;
   site: Site;
   q: Query;
   reloadKey: number;

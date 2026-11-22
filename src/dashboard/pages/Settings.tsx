@@ -2,12 +2,13 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { navigate } from '../App';
 import { Favicon } from '../components/Icons';
 import { buildAiPrompt } from '../lib/aiPrompt';
-import { api, type Site } from '../lib/api';
+import { api, type Health, type Site } from '../lib/api';
 import { fmtMoney } from '../lib/format';
+import { useApi } from '../lib/useApi';
 
-const DOCS = 'https://github.com/surendrapandar/minilytics#';
+const DOCS = 'https://github.com/round-6-creative/minilytics#';
 
-function Section({ title, desc, docs, children }: { title: string; desc?: ReactNode; docs?: string; children: ReactNode }) {
+export function Section({ title, desc, docs, children }: { title: string; desc?: ReactNode; docs?: string; children: ReactNode }) {
   return (
     <section className="card p-6">
       <div className="flex items-baseline justify-between gap-3">
@@ -28,9 +29,9 @@ function DocsLink({ anchor, children = 'Docs →' }: { anchor: string; children?
   );
 }
 
-const SMALL_BUTTON = 'rounded-md px-2 py-0.5 text-xs font-medium transition';
+export const SMALL_BUTTON = 'rounded-md px-2 py-0.5 text-xs font-medium transition';
 
-function CopyButton({ text, label = 'Copy', className = '' }: { text: string; label?: string; className?: string }) {
+export function CopyButton({ text, label = 'Copy', className = '' }: { text: string; label?: string; className?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -47,7 +48,7 @@ function CopyButton({ text, label = 'Copy', className = '' }: { text: string; la
 }
 
 /** A code block with a small header bar, so the copy button never covers the code. */
-function Code({ label, children }: { label?: string; children: string }) {
+export function Code({ label, children }: { label?: string; children: string }) {
   return (
     <div className="overflow-hidden rounded-xl bg-stone-900">
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-1.5">
@@ -60,7 +61,7 @@ function Code({ label, children }: { label?: string; children: string }) {
 }
 
 /** A single line to copy, e.g. a webhook URL. */
-function CopyField({ value }: { value: string }) {
+export function CopyField({ value }: { value: string }) {
   return (
     <div className="flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 py-1.5 pl-3 pr-1.5">
       <code className="min-w-0 flex-1 truncate font-mono text-[13px]">{value}</code>
@@ -148,6 +149,8 @@ export function Settings({ siteId }: { siteId: string }) {
         </div>
       </div>
 
+      <HealthCard siteId={site.id} />
+
       <AiSetup site={site} origin={origin} />
 
       <Section title="1. Install the script" desc={<>Add it to the <code>&lt;head&gt;</code> of every page on {site.domain}.</>} docs="install-on-a-website">
@@ -183,6 +186,8 @@ window.minilytics('identify', { email: user.email, name: user.name });`}</Code>
       <Revenue site={site} origin={origin} form={form} set={set} save={save} onKeyRotated={(api_key) => setSite({ ...site, api_key })} />
 
       <LinkBuilder domain={site.domain} />
+
+      <ShareLinks siteId={site.id} origin={origin} />
 
       <Section title="General">
         <div className="grid gap-4 sm:grid-cols-2">
@@ -227,6 +232,80 @@ window.minilytics('identify', { email: user.email, name: user.name });`}</Code>
         </button>
       </Section>
     </div>
+  );
+}
+
+const STATE_DOT: Record<string, string> = { ok: 'bg-emerald-500', warn: 'bg-amber-500', off: 'bg-stone-300' };
+
+/** Is tracking working? The same checks the hourly job runs, shown on demand. */
+function HealthCard({ siteId }: { siteId: string }) {
+  const { data } = useApi<Health>(`/api/sites/${siteId}/health`);
+  if (!data) return null;
+  return (
+    <Section title="Tracking health" desc={data.ok ? 'Everything that can be checked from here looks right.' : 'Something needs a look.'}>
+      <ul className="space-y-2.5 text-sm">
+        {data.checks.map((c) => (
+          <li key={c.id} className="flex gap-3">
+            <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${STATE_DOT[c.state]}`} />
+            <div className="min-w-0">
+              <span className="font-medium">{c.label}</span> <span className={c.state === 'warn' ? 'text-amber-800' : 'text-stone-500'}>{c.detail}</span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+interface ShareLink {
+  token: string;
+  name: string;
+  created_at: number;
+}
+
+/** Read-only links to this site's dashboard, for a client or a partner. */
+function ShareLinks({ siteId, origin }: { siteId: string; origin: string }) {
+  const [version, setVersion] = useState(0);
+  const [name, setName] = useState('');
+  const { data } = useApi<ShareLink[]>(`/api/sites/${siteId}/shares`, version);
+  return (
+    <Section
+      title="Share a read-only dashboard"
+      desc="Anyone with the link sees this site's totals, sources, pages and revenue for up to 90 days at a time. They never see visitors, customers, emails or settings, and cannot change anything."
+    >
+      <div className="space-y-3">
+        {data?.map((l) => (
+          <div key={l.token}>
+            <div className="mb-1 flex items-center justify-between text-sm">
+              <span className="font-medium">{l.name}</span>
+              <button
+                className="text-xs text-red-600 hover:underline"
+                onClick={async () => {
+                  if (!confirm(`Stop sharing "${l.name}"? The link stops working at once.`)) return;
+                  await api(`/api/sites/${siteId}/shares/${l.token}`, { method: 'DELETE' });
+                  setVersion((v) => v + 1);
+                }}
+              >
+                Stop sharing
+              </button>
+            </div>
+            <CopyField value={`${origin}/share/${l.token}`} />
+          </div>
+        ))}
+        <form
+          className="flex gap-2"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            await api(`/api/sites/${siteId}/shares`, { method: 'POST', json: { name } });
+            setName('');
+            setVersion((v) => v + 1);
+          }}
+        >
+          <input className="input" placeholder="Who is it for? e.g. Client" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
+          <button className="btn-dark shrink-0">Create link</button>
+        </form>
+      </div>
+    </Section>
   );
 }
 
